@@ -9386,6 +9386,7 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     target_ulong pc_next;
 
     pc_next = disas_insn(dc, cpu);
+    tcg_constant_release_pending(dc->uc->tcg_ctx);
 
     if (dc->tf || (dc->base.tb->flags & HF_INHIBIT_IRQ_MASK)) {
         /* if single step mode, we generate only one instruction and

@@ -882,6 +882,7 @@ void tcg_func_start(TCGContext *s)
 
     /* No temps have been previously allocated for size or locality.  */
     memset(s->free_temps, 0, sizeof(s->free_temps));
+    s->nb_const_pending = 0;
 
     s->nb_ops = 0;
     s->nb_labels = 0;
@@ -1111,6 +1112,47 @@ TCGv_i64 tcg_const_i64(TCGContext *tcg_ctx, int64_t val)
     t0 = tcg_temp_new_i64(tcg_ctx);
     tcg_gen_movi_i64(tcg_ctx, t0, val);
     return t0;
+}
+
+static void tcg_constant_track(TCGContext *s, TCGTemp *ts)
+{
+    /* Overflow just leaks the temp until the TB ends; never an error. */
+    if (s->nb_const_pending < TCG_CONST_PENDING_MAX) {
+        s->const_pending[s->nb_const_pending++] = ts;
+    }
+}
+
+TCGv_i32 tcg_constant_i32(TCGContext *tcg_ctx, int32_t val)
+{
+    TCGv_i32 t = tcg_const_i32(tcg_ctx, val);
+    tcg_constant_track(tcg_ctx, tcgv_i32_temp(tcg_ctx, t));
+    return t;
+}
+
+TCGv_i64 tcg_constant_i64(TCGContext *tcg_ctx, int64_t val)
+{
+    TCGv_i64 t = tcg_const_i64(tcg_ctx, val);
+    tcg_constant_track(tcg_ctx, tcgv_i64_temp(tcg_ctx, t));
+    return t;
+}
+
+TCGv_vec tcg_constant_vec_matching(TCGContext *tcg_ctx, TCGv_vec match,
+                                   unsigned vece, int64_t val)
+{
+    TCGv_vec t = tcg_temp_new_vec_matching(tcg_ctx, match);
+    tcg_gen_dupi_vec(tcg_ctx, vece, t, val);
+    tcg_constant_track(tcg_ctx, tcgv_vec_temp(tcg_ctx, t));
+    return t;
+}
+
+void tcg_constant_release_pending(TCGContext *tcg_ctx)
+{
+    int i;
+
+    for (i = 0; i < tcg_ctx->nb_const_pending; i++) {
+        tcg_temp_free_internal(tcg_ctx, tcg_ctx->const_pending[i]);
+    }
+    tcg_ctx->nb_const_pending = 0;
 }
 
 TCGv_i32 tcg_const_local_i32(TCGContext *tcg_ctx, int32_t val)

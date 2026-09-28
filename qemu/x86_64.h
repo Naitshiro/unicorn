@@ -721,6 +721,11 @@
 #define tcg_const_ones_vec tcg_const_ones_vec_x86_64
 #define tcg_const_zeros_vec_matching tcg_const_zeros_vec_matching_x86_64
 #define tcg_const_ones_vec_matching tcg_const_ones_vec_matching_x86_64
+#define tcg_constant_i32 tcg_constant_i32_x86_64
+#define tcg_constant_i64 tcg_constant_i64_x86_64
+#define tcg_constant_vec_matching tcg_constant_vec_matching_x86_64
+#define tcg_constant_release_pending tcg_constant_release_pending_x86_64
+#define tcg_gen_gvec_dup_imm tcg_gen_gvec_dup_imm_x86_64
 #define tcg_gen_dup64i_vec tcg_gen_dup64i_vec_x86_64
 #define tcg_gen_dup32i_vec tcg_gen_dup32i_vec_x86_64
 #define tcg_gen_dup16i_vec tcg_gen_dup16i_vec_x86_64
@@ -1766,6 +1771,7 @@
 #define helper_aesimc_xmm helper_aesimc_xmm_x86_64
 #define helper_aeskeygenassist_xmm helper_aeskeygenassist_xmm_x86_64
 #define cpu_sync_bndcs_hflags cpu_sync_bndcs_hflags_x86_64
+#define cpu_sync_avx_hflag cpu_sync_avx_hflag_x86_64
 #define cpu_x86_support_mca_broadcast cpu_x86_support_mca_broadcast_x86_64
 #define x86_cpu_set_a20 x86_cpu_set_a20_x86_64
 #define cpu_x86_update_cr0 cpu_x86_update_cr0_x86_64

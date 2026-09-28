@@ -2201,6 +2201,30 @@ static void test_x86_mem_hooks_pc_guarantee(void)
     OK(uc_close(uc));
 }
 
+static void test_x86_xrstor_sse_keeps_ymmh(void)
+{
+    uc_engine *uc;
+    // mov eax,2 ; xor edx,edx ; xrstor [rcx]
+    char code[] = "\xb8\x02\x00\x00\x00\x31\xd2\x0f\xae\x29";
+    uint64_t ymm_in[4] = {0x1111111111111111ULL, 0x2222222222222222ULL,
+                          0x3333333333333333ULL, 0x4444444444444444ULL};
+    uint64_t ymm_out[4];
+    uint64_t rcx = 0x3000; // 64-byte aligned, inside code_start mapping, zeroed
+    uint8_t zero[1024] = {0};
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, rcx, zero, sizeof(zero)));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM0, ymm_in));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_YMM0, ymm_out));
+
+    TEST_CHECK(ymm_out[0] == 0 && ymm_out[1] == 0);
+    TEST_CHECK(ymm_out[2] == ymm_in[2] && ymm_out[3] == ymm_in[3]);
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
     {"test_x86_in", test_x86_in},
     {"test_x86_out", test_x86_out},
@@ -2265,4 +2289,5 @@ TEST_LIST = {
     {"test_x86_dr7", test_x86_dr7},
     {"test_x86_hook_block", test_x86_hook_block},
     {"test_x86_mem_hooks_pc_guarantee", test_x86_mem_hooks_pc_guarantee},
+    {"test_x86_xrstor_sse_keeps_ymmh", test_x86_xrstor_sse_keeps_ymmh},
     {NULL, NULL}};
