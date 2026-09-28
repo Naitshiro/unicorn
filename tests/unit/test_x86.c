@@ -2225,7 +2225,78 @@ static void test_x86_xrstor_sse_keeps_ymmh(void)
     OK(uc_close(uc));
 }
 
+static void test_x86_sse_golden(void)
+{
+    uc_engine *uc;
+    // rax = 0x3000 data block; see layout below. Expected values captured from a native SSE4.1 host.
+    char code[] =
+        "\xf3\x0f\x6f\x00"             // movdqu xmm0, [rax]
+        "\xf3\x0f\x6f\x48\x10"         // movdqu xmm1, [rax+0x10]
+        "\x66\x0f\x6f\xd0"             // movdqa xmm2, xmm0
+        "\x66\x0f\xfc\xd1"             // paddb xmm2, xmm1
+        "\x66\x0f\x6f\xd8"             // movdqa xmm3, xmm0
+        "\x66\x0f\x38\x00\x58\x20"     // pshufb xmm3, [rax+0x20]
+        "\x66\x0f\x6f\xe0"             // movdqa xmm4, xmm0
+        "\x66\x0f\x74\xe1"             // pcmpeqb xmm4, xmm1
+        "\x66\x0f\xd7\xcc"             // pmovmskb ecx, xmm4
+        "\xf3\x0f\x6f\x68\x30"         // movdqu xmm5, [rax+0x30]
+        "\x66\x0f\x3a\x40\x68\x40\xf1" // dpps xmm5, [rax+0x40], 0xf1
+        "\xf3\x0f\x6f\x70\x50"         // movdqu xmm6, [rax+0x50]
+        "\xf3\x0f\x6f\x78\x60"         // movdqu xmm7, [rax+0x60]
+        "\x66\x0f\x38\x14\xf7"         // blendvps xmm6, xmm7 (mask = xmm0)
+        "\xf3\x0f\x7f\x50\x70"         // movdqu [rax+0x70], xmm2
+        "\x66\x0f\x73\xd1\x04"         // psrlq xmm1, 4
+        "\x0f\xc2\xf8\x01";            // cmpltps xmm7, xmm0
+    uint8_t data[0x80];
+    float dp_a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float dp_b[4] = {0.5f, 0.25f, 2.0f, 1.0f};
+    uint64_t rax = 0x3000, rcx = 0;
+    uint64_t xmm[8][2];
+    uint64_t mem[2];
+    int i;
+    static const uint64_t expect[8][2] = {
+        {0x7766554433221100ULL, 0xffeeddccbbaa9988ULL}, // xmm0: movdqu load
+        {0x05a665a445a225a0ULL, 0x05aee5acc5aaa5a8ULL}, // xmm1: psrlq 4
+        {0xd1ccaf888d446b00ULL, 0x59dc37981554f310ULL}, // xmm2: paddb
+        {0x8899aabbccddee00ULL, 0x0011223344556677ULL}, // xmm3: pshufb
+        {0x00ff00ff00ff00ffULL, 0x00ff00ff00ff00ffULL}, // xmm4: pcmpeqb
+        {0x0000000041300000ULL, 0x0000000000000000ULL}, // xmm5: dpps = 11.0f in lane 0
+        {0x1111111111111111ULL, 0x2222222222222222ULL}, // xmm6: blendvps
+        {0xffffffffffffffffULL, 0x0000000000000000ULL}, // xmm7: cmpltps
+    };
+
+    for (i = 0; i < 16; i++) {
+        data[i] = (uint8_t)(i * 0x11);                          // A
+        data[0x10 + i] = (i & 1) ? 0x5a : (uint8_t)(i * 0x11);  // B: equal to A on even bytes
+        data[0x20 + i] = (uint8_t)(15 - i);                     // pshufb control: reverse
+    }
+    data[0x20] = 0x80;                                          // byte 0 -> zero
+    memcpy(data + 0x30, dp_a, sizeof(dp_a));
+    memcpy(data + 0x40, dp_b, sizeof(dp_b));
+    memset(data + 0x50, 0x11, 16);
+    memset(data + 0x60, 0x22, 16);
+    memset(data + 0x70, 0, 16);
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, rax, data, sizeof(data)));
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+
+    for (i = 0; i < 8; i++) {
+        OK(uc_reg_read(uc, UC_X86_REG_XMM0 + i, xmm[i]));
+        TEST_CHECK(xmm[i][0] == expect[i][0] && xmm[i][1] == expect[i][1]);
+        TEST_MSG("xmm%d = %016" PRIx64 ":%016" PRIx64, i, xmm[i][1], xmm[i][0]);
+    }
+    OK(uc_reg_read(uc, UC_X86_REG_RCX, &rcx));
+    TEST_CHECK(rcx == 0x5555); // pmovmskb
+    OK(uc_mem_read(uc, rax + 0x70, mem, sizeof(mem)));
+    TEST_CHECK(mem[0] == expect[2][0] && mem[1] == expect[2][1]); // movdqu store of paddb result
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
+    {"test_x86_sse_golden", test_x86_sse_golden},
     {"test_x86_in", test_x86_in},
     {"test_x86_out", test_x86_out},
     {"test_x86_mem_hook_all", test_x86_mem_hook_all},
