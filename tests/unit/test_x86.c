@@ -1283,8 +1283,8 @@ static void test_x86_invalid_vex_l(void)
 {
     uc_engine *uc;
 
-    /* vmovdqu ymm1, [rcx] */
-    char code[] = {'\xC5', '\xFE', '\x6F', '\x09'};
+    /* vmovd xmm1, ecx with VEX.L=1: #UD on real hardware */
+    char code[] = {'\xC5', '\xFD', '\x6E', '\xC9'};
 
     /* initialize memory and run emulation  */
     OK(uc_open(UC_ARCH_X86, UC_MODE_64, &uc));
@@ -2340,12 +2340,12 @@ static void test_x86_vex_new_decoder_hook_size(void)
     OK(uc_close(uc));
 }
 
-// VEX-encoded SSE/AVX is not implemented until Phase 3: it must fault, not execute as legacy SSE.
+// FMA is not implemented until Phase 5: it must fault, not execute as something else.
 static void test_x86_vex_unimplemented_is_invalid(void)
 {
     uc_engine *uc;
     uc_hook hk;
-    char code[] = "\xc5\xf1\xef\xc2"; // vpxor xmm0, xmm1, xmm2
+    char code[] = "\xc4\xe2\x71\xb8\xc2"; // vfmadd231ps xmm0, xmm1, xmm2
     VexHookLog log = {{0}, {0}, 0};
     uint64_t x0[2] = {0x4444, 0}, x1[2] = {0x1111, 0}, x2[2] = {0x2222, 0}, out[2];
 
@@ -2357,7 +2357,7 @@ static void test_x86_vex_unimplemented_is_invalid(void)
     uc_assert_err(UC_ERR_INSN_INVALID,
                   uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
     OK(uc_reg_read(uc, UC_X86_REG_XMM0, out));
-    TEST_CHECK(out[0] == 0x4444 && out[1] == 0); // untouched (old decoder produced 0x6666)
+    TEST_CHECK(out[0] == 0x4444 && out[1] == 0); // untouched
 
     OK(uc_close(uc));
 }
@@ -2426,7 +2426,266 @@ static void test_x86_bmi_new_decoder_semantics(void)
     OK(uc_close(uc));
 }
 
+// CPUID must advertise AVX/AVX2 (and OSXSAVE) now that VEX decode backs them; FMA/F16C wait for Phase 5.
+static void test_x86_avx_cpuid_xcr0(void)
+{
+    uc_engine *uc;
+    char code[] = "\xb8\x01\x00\x00\x00" // mov eax, 1
+                  "\x0f\xa2"             // cpuid
+                  "\x41\x89\xc8"         // mov r8d, ecx
+                  "\xb8\x07\x00\x00\x00" // mov eax, 7
+                  "\x31\xc9"             // xor ecx, ecx
+                  "\x0f\xa2"             // cpuid
+                  "\x41\x89\xd9"         // mov r9d, ebx
+                  "\x31\xc9"             // xor ecx, ecx
+                  "\x0f\x01\xd0";        // xgetbv
+    uint64_t r8, r9, rax, rdx;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_R8, &r8));
+    OK(uc_reg_read(uc, UC_X86_REG_R9, &r9));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_read(uc, UC_X86_REG_RDX, &rdx));
+
+    TEST_CHECK((r8 >> 28) & 1);    // CPUID.1:ECX.AVX
+    TEST_CHECK((r8 >> 27) & 1);    // CPUID.1:ECX.OSXSAVE
+    TEST_CHECK(!((r8 >> 12) & 1)); // CPUID.1:ECX.FMA (Phase 5)
+    TEST_CHECK(!((r8 >> 29) & 1)); // CPUID.1:ECX.F16C (Phase 5)
+    TEST_CHECK((r9 >> 5) & 1);     // CPUID.(7,0):EBX.AVX2
+    TEST_MSG("cpuid.1.ecx=%08" PRIx64 " cpuid.7.ebx=%08" PRIx64, r8, r9);
+    TEST_CHECK((rax & 0xffffffff) == 7 && (rdx & 0xffffffff) == 0); // XCR0 = x87|SSE|YMM
+    TEST_MSG("xcr0=%08" PRIx64 ":%08" PRIx64, rdx, rax);
+
+    OK(uc_close(uc));
+}
+
+// The VEX subset real msvcrt/ntdll/vcruntime140 memset/memcpy/strlen use (VEX.128 and VEX.256), mixed
+// with one legacy SSE op. Expected values captured from native AVX2 hardware (Intel i7-14700).
+static void test_x86_avx_golden(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc5\xfe\x6f\x00"             // vmovdqu ymm0, [rax]
+                  "\xc5\xfe\x6f\x48\x20"         // vmovdqu ymm1, [rax+0x20]
+                  "\xc5\xfd\x74\xd1"             // vpcmpeqb ymm2, ymm0, ymm1
+                  "\xc5\xfd\xd7\xca"             // vpmovmskb ecx, ymm2
+                  "\xc5\xfd\x75\x58\x20"         // vpcmpeqw ymm3, ymm0, [rax+0x20]
+                  "\xc5\xfd\xd7\xd3"             // vpmovmskb edx, ymm3
+                  "\xc5\xf9\xef\xe1"             // vpxor xmm4, xmm0, xmm1 (VEX.128 zeroes 255:128)
+                  "\xc5\xfd\xef\xe9"             // vpxor ymm5, ymm0, ymm1
+                  "\xc5\xf8\x10\x70\x40"         // vmovups xmm6, [rax+0x40]
+                  "\xc4\xe3\x4d\x18\x70\x50\x01" // vinsertf128 ymm6, ymm6, [rax+0x50], 1
+                  "\xc5\xfc\x28\x78\x40"         // vmovaps ymm7, [rax+0x40]
+                  "\x66\x0f\xef\xff"             // pxor xmm7, xmm7 (legacy SSE keeps 255:128)
+                  "\xc5\xfc\x11\x2b"             // vmovups [rbx], ymm5
+                  "\xc5\xfc\x29\x73\x20"         // vmovaps [rbx+0x20], ymm6
+                  "\xc5\xfd\x7f\x53\x40"         // vmovdqa [rbx+0x40], ymm2
+                  "\xc5\xfd\xe7\x43\x60";        // vmovntdq [rbx+0x60], ymm0
+    static const uint64_t expect_ymm[8][4] = {
+        {0x342d261f18110a03ULL, 0x6c655e575049423bULL, 0xa49d968f88817a73ULL, 0xdcd5cec7c0b9b2abULL},
+        {0x6e2d7c45184b0a03ULL, 0x6c3f04570a134261ULL, 0xfec796d5d2812029ULL, 0x86d5949dc0e3e8abULL},
+        {0x00ff0000ff00ffffULL, 0xff0000ff0000ff00ULL, 0x0000ff0000ff0000ULL, 0x00ff0000ff0000ffULL},
+        {0x000000000000ffffULL, 0x0000000000000000ULL, 0x0000000000000000ULL, 0x0000000000000000ULL},
+        {0x5a005a5a005a0000ULL, 0x005a5a005a5a005aULL, 0x0000000000000000ULL, 0x0000000000000000ULL},
+        {0x5a005a5a005a0000ULL, 0x005a5a005a5a005aULL, 0x5a5a005a5a005a5aULL, 0x5a005a5a005a5a00ULL},
+        {0xc5b29f8c79665340ULL, 0x5d4a372411feebd8ULL, 0xf5e2cfbca9968370ULL, 0x8d7a6754412e1b08ULL},
+        {0x0000000000000000ULL, 0x0000000000000000ULL, 0xf5e2cfbca9968370ULL, 0x8d7a6754412e1b08ULL},
+    };
+    static const uint64_t expect_mem[16] = {
+        0x5a005a5a005a0000ULL, 0x005a5a005a5a005aULL, 0x5a5a005a5a005a5aULL, 0x5a005a5a005a5a00ULL,
+        0xc5b29f8c79665340ULL, 0x5d4a372411feebd8ULL, 0xf5e2cfbca9968370ULL, 0x8d7a6754412e1b08ULL,
+        0x00ff0000ff00ffffULL, 0xff0000ff0000ff00ULL, 0x0000ff0000ff0000ULL, 0x00ff0000ff0000ffULL,
+        0x342d261f18110a03ULL, 0x6c655e575049423bULL, 0xa49d968f88817a73ULL, 0xdcd5cec7c0b9b2abULL,
+    };
+    uint8_t data[0x100];
+    uint64_t rax = 0x3000, rbx = 0x3080, rcx, rdx;
+    uint64_t ymm[4], mem[16];
+    int i;
+
+    for (i = 0; i < 0x20; i++) {
+        data[i] = (uint8_t)(i * 7 + 3);                                 // A
+        data[0x20 + i] = (i % 3 == 0) ? data[i] : (uint8_t)(data[i] ^ 0x5a); // B: equal to A where i % 3 == 0
+        data[0x40 + i] = (uint8_t)(0x40 + i * 0x13);                    // C
+    }
+    data[0x21] = data[0x01]; // make word 0 fully equal
+    memset(data + 0x60, 0, sizeof(data) - 0x60);
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, rax, data, sizeof(data)));
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+
+    for (i = 0; i < 8; i++) {
+        OK(uc_reg_read(uc, UC_X86_REG_YMM0 + i, ymm));
+        TEST_CHECK(memcmp(ymm, expect_ymm[i], sizeof(ymm)) == 0);
+        TEST_MSG("ymm%d = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, i, ymm[3], ymm[2],
+                 ymm[1], ymm[0]);
+    }
+    OK(uc_reg_read(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_read(uc, UC_X86_REG_RDX, &rdx));
+    TEST_CHECK(rcx == 0x4924924bULL);
+    TEST_CHECK(rdx == 0x00000003ULL);
+    TEST_MSG("rcx=%" PRIx64 " rdx=%" PRIx64, rcx, rdx);
+    OK(uc_mem_read(uc, rbx, mem, sizeof(mem)));
+    for (i = 0; i < 16; i++) {
+        TEST_CHECK(mem[i] == expect_mem[i]);
+        TEST_MSG("mem[%d] = %016" PRIx64, i, mem[i]);
+    }
+
+    OK(uc_close(uc));
+}
+
+// VZEROUPPER keeps bits 127:0 and clears 255:128; VZEROALL clears everything.
+static void test_x86_avx_vzeroupper_vzeroall(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc5\xf8\x77"          // vzeroupper
+                  "\xc5\xfc\x11\x00"      // vmovups [rax], ymm0
+                  "\xc5\xfc\x77";         // vzeroall
+    uint64_t in[4], out[4], mem[4], rax = 0x3000;
+    int i;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    for (i = 0; i < 8; i++) {
+        in[0] = 0x1111111111111111ULL * (i + 1);
+        in[1] = in[0] + 1;
+        in[2] = in[0] + 2;
+        in[3] = in[0] + 3;
+        OK(uc_reg_write(uc, UC_X86_REG_YMM0 + i, in));
+    }
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_emu_start(uc, code_start, code_start + 7, 0, 0)); // vzeroupper + store
+    for (i = 0; i < 8; i++) {
+        OK(uc_reg_read(uc, UC_X86_REG_YMM0 + i, out));
+        TEST_CHECK(out[0] == 0x1111111111111111ULL * (i + 1) && out[1] == out[0] + 1 && out[2] == 0 &&
+                   out[3] == 0);
+        TEST_MSG("after vzeroupper ymm%d = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, i,
+                 out[3], out[2], out[1], out[0]);
+    }
+    OK(uc_mem_read(uc, rax, mem, sizeof(mem)));
+    TEST_CHECK(mem[0] == 0x1111111111111111ULL && mem[1] == 0x1111111111111112ULL && mem[2] == 0 &&
+               mem[3] == 0);
+    OK(uc_emu_start(uc, code_start + 7, code_start + sizeof(code) - 1, 0, 0)); // vzeroall
+    for (i = 0; i < 8; i++) {
+        OK(uc_reg_read(uc, UC_X86_REG_YMM0 + i, out));
+        TEST_CHECK(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+        TEST_MSG("after vzeroall ymm%d = %016" PRIx64 ":%016" PRIx64, i, out[1], out[0]);
+    }
+
+    OK(uc_close(uc));
+}
+
+// The original Unicorn repro: vinsertf128 ymm0, ymm0, xmm0, 1 (register form, as in msvcrt memset).
+static void test_x86_avx_vinsertf128_repro(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe3\x7d\x18\xc0\x01"; // vinsertf128 ymm0, ymm0, xmm0, 1
+    uint64_t in[4] = {0x0123456789abcdefULL, 0xfedcba9876543210ULL, 0x5555555555555555ULL,
+                      0x6666666666666666ULL};
+    uint64_t out[4];
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_YMM0, in));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_YMM0, out));
+    TEST_CHECK(out[0] == in[0] && out[1] == in[1] && out[2] == in[0] && out[3] == in[1]);
+    TEST_MSG("ymm0 = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, out[3], out[2], out[1],
+             out[0]);
+
+    OK(uc_close(uc));
+}
+
+// BZHI with index >= operand size must return the source unchanged and set CF (upstream 9ad2ba6e8e).
+// Expected values captured from native hardware.
+static void test_x86_bzhi_index_ge_size(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe2\xf0\xf5\xc3" // bzhi rax, rbx, rcx
+                  "\x9c\x41\x58"         // pushfq ; pop r8
+                  "\xc4\xe2\xc8\xf5\xfb" // bzhi rdi, rbx, rsi
+                  "\x9c\x41\x59";        // pushfq ; pop r9
+    uint64_t rbx = 0x8123456789abcdefULL, rcx = 0x40, rsi = 0x3f, rsp = 0x3000, rax, rdi, r8, r9;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_write(uc, UC_X86_REG_RSI, &rsi));
+    OK(uc_reg_write(uc, UC_X86_REG_RSP, &rsp));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_read(uc, UC_X86_REG_RDI, &rdi));
+    OK(uc_reg_read(uc, UC_X86_REG_R8, &r8));
+    OK(uc_reg_read(uc, UC_X86_REG_R9, &r9));
+
+    TEST_CHECK(rax == 0x8123456789abcdefULL && (r8 & 0x8c1) == 0x81); // SF, CF
+    TEST_MSG("rax=%016" PRIx64 " flags=%" PRIx64, rax, r8 & 0x8c1);
+    TEST_CHECK(rdi == 0x0123456789abcdefULL && (r9 & 0x8c1) == 0);
+    TEST_MSG("rdi=%016" PRIx64 " flags=%" PRIx64, rdi, r9 & 0x8c1);
+
+    OK(uc_close(uc));
+}
+
+// Invalid or unsupported VEX forms must raise #UD, never abort the host through a decoder assertion.
+// vpinsrw with VEX.pp=00 (an MMX form, #UD on hardware; used to hit assert(vec_len == 16)) and
+// VEX map 1 opcode 0x38 (#UD on hardware). Scalar ops with VEX.L=1 are LIG on hardware (VEX.L is
+// ignored, not #UD): see test_x86_avx_scalar_vexl_ignored below instead.
+static void test_x86_vex_invalid_forms_no_abort(void)
+{
+    static const char *const codes[] = {
+        "\xc4\xe1\x7c\xc4\xc1\x31", // vpinsrw xmm0, ymm0, ecx, 0x31 with VEX.pp=00, VEX.L=1
+        "\xc4\xe1\x79\x38\xc1",     // VEX map 1, opcode 0x38
+    };
+    static const int lens[] = {6, 5};
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        uc_engine *uc;
+        uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, codes[i], lens[i]);
+        uc_assert_err(UC_ERR_INSN_INVALID, uc_emu_start(uc, code_start, code_start + lens[i], 0, 0));
+        TEST_MSG("case %d", i);
+        OK(uc_close(uc));
+    }
+}
+
+// Scalar (class 3) VEX-encoded instructions are LIG on real hardware: VEX.L is ignored, not #UD.
+// vroundss xmm0, xmm0, xmm1, 0x31 with VEX.L=1 must execute as a normal 128-bit scalar op: round
+// xmm1's low float (2.5) toward -inf (imm8=0x31 selects RC=floor, overriding MXCSR.RC) into xmm0's
+// low dword, pass xmm0's own upper 96 bits through unchanged (the H operand here is xmm0 itself),
+// and zero bits 255:128 of ymm0 (VEX.128 destination zeroing applies regardless of the ignored L bit).
+static void test_x86_avx_scalar_vexl_ignored(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe3\x7d\x0a\xc1\x31"; // vroundss xmm0, xmm0, xmm1, 0x31 (VEX.L=1)
+    uint64_t xmm0_in[2] = {0x11223344deadbeefULL, 0x99aabbcc55667788ULL};
+    uint64_t ymm0_in[4] = {xmm0_in[0], xmm0_in[1], 0x7777777777777777ULL, 0x7777777777777777ULL};
+    uint64_t xmm1_in[2] = {0xcafebabe40200000ULL, 0x1111111122222222ULL}; // low dword = 2.5f
+    uint64_t ymm0_out[4];
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_YMM0, ymm0_in));
+    OK(uc_reg_write(uc, UC_X86_REG_XMM1, xmm1_in));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_YMM0, ymm0_out));
+
+    TEST_CHECK(ymm0_out[0] == 0x1122334440000000ULL);
+    TEST_CHECK(ymm0_out[1] == xmm0_in[1]);
+    TEST_CHECK(ymm0_out[2] == 0 && ymm0_out[3] == 0);
+    TEST_MSG("ymm0 = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, ymm0_out[3], ymm0_out[2],
+             ymm0_out[1], ymm0_out[0]);
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
+    {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
+    {"test_x86_avx_golden", test_x86_avx_golden},
+    {"test_x86_avx_vzeroupper_vzeroall", test_x86_avx_vzeroupper_vzeroall},
+    {"test_x86_avx_vinsertf128_repro", test_x86_avx_vinsertf128_repro},
+    {"test_x86_bzhi_index_ge_size", test_x86_bzhi_index_ge_size},
+    {"test_x86_vex_invalid_forms_no_abort", test_x86_vex_invalid_forms_no_abort},
+    {"test_x86_avx_scalar_vexl_ignored", test_x86_avx_scalar_vexl_ignored},
+
     {"test_x86_vex_new_decoder_hook_size", test_x86_vex_new_decoder_hook_size},
     {"test_x86_vex_unimplemented_is_invalid", test_x86_vex_unimplemented_is_invalid},
     {"test_x86_les_not_vex_32", test_x86_les_not_vex_32},

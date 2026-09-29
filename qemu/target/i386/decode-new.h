@@ -53,6 +53,7 @@ typedef enum X86OpType {
     X86_TYPE_Y, /* string destination */
 
     /* Custom */
+    X86_TYPE_WM, /* modrm byte selects an XMM/YMM memory operand */
     X86_TYPE_2op, /* 2-operand RMW instruction */
     X86_TYPE_LoBits, /* encoded in bits 0-2 of the operand + REX.B */
     X86_TYPE_0, /* Hard-coded GPRs (RAX..RDI) */
@@ -146,6 +147,12 @@ typedef enum X86InsnSpecial {
      */
     X86_SPECIAL_ZExtOp0,
     X86_SPECIAL_ZExtOp2,
+
+    /*
+     * Register operand 2 is extended to full width, while a memory operand
+     * is doubled in size if VEX.L=1.
+     */
+    X86_SPECIAL_AVXExtMov,
 
     /*
      * MMX instruction exists with no prefix; if there is no prefix, V/H/W/U operands
