@@ -2605,6 +2605,7 @@ static void test_x86_avx_vldmxcsr_vstmxcsr(void)
                   "\x0f\xae\x58\x08";     // stmxcsr [rax+8]
     char bad_l[] = "\xc5\xfc\xae\x10";    // vldmxcsr [rax] with VEX.L=1
     char bad_v[] = "\xc5\xf0\xae\x58\x04"; // vstmxcsr [rax+4] with vvvv=0001
+    char bad_ls[] = "\xc5\xfc\xae\x58\x04"; // vstmxcsr [rax+4] with VEX.L=1 (used to abort TCG)
     uint64_t rax = 0x3000, mxcsr;
     uint32_t in = 0x3f80, out[2];
 
@@ -2628,6 +2629,12 @@ static void test_x86_avx_vldmxcsr_vstmxcsr(void)
     OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
     uc_assert_err(UC_ERR_INSN_INVALID,
                   uc_emu_start(uc, code_start, code_start + sizeof(bad_v) - 1, 0, 0));
+    OK(uc_close(uc));
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, bad_ls, sizeof(bad_ls) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    uc_assert_err(UC_ERR_INSN_INVALID,
+                  uc_emu_start(uc, code_start, code_start + sizeof(bad_ls) - 1, 0, 0));
     OK(uc_close(uc));
 }
 

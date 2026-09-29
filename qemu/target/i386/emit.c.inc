@@ -1779,6 +1779,8 @@ static void gen_STMXCSR(DisasContext *s, CPUX86State *env, X86DecodedInsn *decod
 
     if (s->vex_l) {
         gen_illegal_opcode(s);
+        /* Unicorn: define T0 for the unreachable writeback, or TCG aborts on a dead temp. */
+        tcg_gen_movi_tl(tcg_ctx, s->T0, 0);
         return;
     }
     /* Unicorn: no helper_update_mxcsr in this QEMU; same as legacy STMXCSR. */
