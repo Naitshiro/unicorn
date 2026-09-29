@@ -2922,6 +2922,36 @@ static void test_x86_f16c(void)
     OK(uc_close(uc));
 }
 
+// MXCSR.FZ must flush denormal SSE results (legacy and FMA), not x87 ones. Values from an i7-14700.
+static void test_x86_mxcsr_ftz(void)
+{
+    uc_engine *uc;
+    char code[] = "\xf2\x0f\x59\xc1"      // mulsd xmm0, xmm1
+                  "\xc4\xe2\xd9\xa9\xdd"; // vfmadd213sd xmm3, xmm4, xmm5
+    uint64_t tiny[2] = {0x01a56e1fc2f8f359ULL, 0}, small[2] = {0x3ddb7cdfd9d7bdbbULL, 0}, zero[2] = {0, 0};
+    uint64_t x0[2], x3[2];
+    uint32_t mxcsr;
+    int ftz;
+
+    for (ftz = 0; ftz < 2; ftz++) {
+        mxcsr = ftz ? 0x9f80 : 0x1f80;
+        uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+        OK(uc_reg_write(uc, UC_X86_REG_MXCSR, &mxcsr));
+        OK(uc_reg_write(uc, UC_X86_REG_XMM0, tiny));
+        OK(uc_reg_write(uc, UC_X86_REG_XMM1, small));
+        OK(uc_reg_write(uc, UC_X86_REG_XMM3, tiny));
+        OK(uc_reg_write(uc, UC_X86_REG_XMM4, small));
+        OK(uc_reg_write(uc, UC_X86_REG_XMM5, zero));
+        OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+        OK(uc_reg_read(uc, UC_X86_REG_XMM0, x0));
+        OK(uc_reg_read(uc, UC_X86_REG_XMM3, x3));
+        TEST_CHECK(x0[0] == (ftz ? 0 : 0x000012688b70e62bULL)); // 1e-300 * 1e-10
+        TEST_CHECK(x3[0] == (ftz ? 0 : 0x000012688b70e62bULL));
+        TEST_MSG("ftz=%d mulsd=%016" PRIx64 " fma=%016" PRIx64, ftz, x0[0], x3[0]);
+        OK(uc_close(uc));
+    }
+}
+
 TEST_LIST = {
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
@@ -3007,4 +3037,5 @@ TEST_LIST = {
     {"test_x86_legacy_sse_new_decoder", test_x86_legacy_sse_new_decoder},
     {"test_x86_fma", test_x86_fma},
     {"test_x86_f16c", test_x86_f16c},
+    {"test_x86_mxcsr_ftz", test_x86_mxcsr_ftz},
     {NULL, NULL}};
