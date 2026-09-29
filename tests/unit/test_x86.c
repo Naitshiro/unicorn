@@ -2295,7 +2295,143 @@ static void test_x86_sse_golden(void)
     OK(uc_close(uc));
 }
 
+typedef struct {
+    uint64_t addr[8];
+    uint32_t size[8];
+    int n;
+} VexHookLog;
+
+static void test_x86_vex_hook_code_cb(uc_engine *uc, uint64_t address,
+                                      uint32_t size, void *user_data)
+{
+    VexHookLog *log = (VexHookLog *)user_data;
+    if (log->n < 8) {
+        log->addr[log->n] = address;
+        log->size[log->n] = size;
+        log->n++;
+    }
+}
+
+// VEX instructions go through the QEMU 7.2 decoder; UC_HOOK_CODE must still see the real size.
+static void test_x86_vex_new_decoder_hook_size(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    char code[] = "\xc4\xe2\x60\xf2\xc1"         // andn eax, ebx, ecx
+                  "\xc4\xe3\x7b\xf0\xc1\x08"     // rorx eax, ecx, 8
+                  "\x90";                        // nop
+    VexHookLog log = {{0}, {0}, 0};
+    uint64_t rbx = 0x00000000f0f0f0f0ULL, rcx = 0x0000000012345678ULL, rax;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_CODE, test_x86_vex_hook_code_cb, &log, 1, 0));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+
+    TEST_CHECK(log.n == 3);
+    TEST_CHECK(log.addr[0] == code_start && log.size[0] == 5);
+    TEST_CHECK(log.addr[1] == code_start + 5 && log.size[1] == 6);
+    TEST_CHECK(log.addr[2] == code_start + 11 && log.size[2] == 1);
+    TEST_MSG("sizes %u %u %u", log.size[0], log.size[1], log.size[2]);
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    TEST_CHECK(rax == 0x78123456ULL); // ror32(0x12345678, 8), andn result overwritten
+
+    OK(uc_close(uc));
+}
+
+// VEX-encoded SSE/AVX is not implemented until Phase 3: it must fault, not execute as legacy SSE.
+static void test_x86_vex_unimplemented_is_invalid(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    char code[] = "\xc5\xf1\xef\xc2"; // vpxor xmm0, xmm1, xmm2
+    VexHookLog log = {{0}, {0}, 0};
+    uint64_t x0[2] = {0x4444, 0}, x1[2] = {0x1111, 0}, x2[2] = {0x2222, 0}, out[2];
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_XMM0, x0));
+    OK(uc_reg_write(uc, UC_X86_REG_XMM1, x1));
+    OK(uc_reg_write(uc, UC_X86_REG_XMM2, x2));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_CODE, test_x86_vex_hook_code_cb, &log, 1, 0));
+    uc_assert_err(UC_ERR_INSN_INVALID,
+                  uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_XMM0, out));
+    TEST_CHECK(out[0] == 0x4444 && out[1] == 0); // untouched (old decoder produced 0x6666)
+
+    OK(uc_close(uc));
+}
+
+// In 32-bit mode C4 with modrm.mod != 3 is LES, not VEX: must stay on the legacy decoder.
+static void test_x86_les_not_vex_32(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    char code[] = "\xc4\x01"; // les eax, [ecx]
+    VexHookLog log = {{0}, {0}, 0};
+    uint32_t ecx = 0x2000;
+    uc_err err;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_32, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_ECX, &ecx));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_CODE, test_x86_vex_hook_code_cb, &log, 1, 0));
+    err = uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0);
+    TEST_CHECK(err != UC_ERR_INSN_INVALID); // segment load may fault, but it decodes as LES
+    TEST_CHECK(log.n >= 1 && log.size[0] == 2);
+
+    OK(uc_close(uc));
+}
+
+// BMI results/flags now come from the new decoder (upstream fixes 99282098d, b14c00989 + BLSI carry).
+static void test_x86_bmi_new_decoder_semantics(void)
+{
+    uc_engine *uc;
+    uint64_t rax, rbx, rcx;
+    // blsi eax, ecx ; pushfq ; pop rdx ; blsr eax, ecx ; pushfq ; pop rsi ;
+    // mov rax, -1 ; pdep eax, ebx, ecx ; mov r8, rax ;
+    // rorx edi, [rip+2], 8 ; jmp +4 ; dd 0x12345678
+    char code[] = "\xc4\xe2\x78\xf3\xd9"             // blsi eax, ecx
+                  "\x9c\x5a"                         // pushfq ; pop rdx
+                  "\xc4\xe2\x78\xf3\xc9"             // blsr eax, ecx
+                  "\x9c\x5e"                         // pushfq ; pop rsi
+                  "\x48\xc7\xc0\xff\xff\xff\xff"     // mov rax, -1
+                  "\xc4\xe2\x63\xf5\xc1"             // pdep eax, ebx, ecx
+                  "\x49\x89\xc0"                     // mov r8, rax
+                  "\xc4\xe3\x7b\xf0\x3d\x02\x00\x00\x00\x08" // rorx edi, [rip+2], 8
+                  "\xeb\x04"                         // jmp over data
+                  "\x78\x56\x34\x12";                // data
+    uint64_t rsp = 0x4f00, rdx, rsi, r8, rdi;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    rbx = 0x3;
+    rcx = 0xf0;
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_write(uc, UC_X86_REG_RSP, &rsp));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RDX, &rdx));
+    OK(uc_reg_read(uc, UC_X86_REG_RSI, &rsi));
+    OK(uc_reg_read(uc, UC_X86_REG_R8, &r8));
+    OK(uc_reg_read(uc, UC_X86_REG_RDI, &rdi));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+
+    TEST_CHECK((rdx & 0x1) == 0x1);   // blsi 0xf0: CF = (src != 0) = 1
+    TEST_CHECK((rdx & 0x40) == 0);    // ZF = 0 (result 0x10)
+    TEST_CHECK((rsi & 0x1) == 0);     // blsr 0xf0: CF = (src == 0) = 0
+    TEST_CHECK((rsi & 0x40) == 0);    // result 0xe0 != 0
+    TEST_CHECK(r8 == 0x30);           // pdep(3, mask 0xf0), 32-bit op zero-extends
+    TEST_CHECK(rdi == 0x78123456ULL); // rip-relative operand with trailing imm8
+    TEST_MSG("rdx=%" PRIx64 " rsi=%" PRIx64 " r8=%" PRIx64 " rdi=%" PRIx64, rdx, rsi, r8, rdi);
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
+    {"test_x86_vex_new_decoder_hook_size", test_x86_vex_new_decoder_hook_size},
+    {"test_x86_vex_unimplemented_is_invalid", test_x86_vex_unimplemented_is_invalid},
+    {"test_x86_les_not_vex_32", test_x86_les_not_vex_32},
+    {"test_x86_bmi_new_decoder_semantics", test_x86_bmi_new_decoder_semantics},
+
     {"test_x86_sse_golden", test_x86_sse_golden},
     {"test_x86_in", test_x86_in},
     {"test_x86_out", test_x86_out},

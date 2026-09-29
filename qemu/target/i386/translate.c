@@ -22,6 +22,7 @@
 #include "cpu.h"
 #include "exec/exec-all.h"
 #include "tcg/tcg-op.h"
+#include "tcg/tcg-op-gvec.h"
 #include "exec/cpu_ldst.h"
 #include "exec/translator.h"
 
@@ -38,6 +39,7 @@
 #define PREFIX_DATA   0x08
 #define PREFIX_ADR    0x10
 #define PREFIX_VEX    0x20
+#define PREFIX_REX    0x40
 
 #ifdef TARGET_X86_64
 #define CODE64(s) ((s)->code64)
@@ -47,6 +49,18 @@
 #define CODE64(s) 0
 #define REX_X(s) 0
 #define REX_B(s) 0
+#endif
+
+/* Unicorn: accessors used by the QEMU 7.2 decoder (decode-new.c.inc, emit.c.inc). */
+#define PE(S)     ((S)->pe)
+#define VM86(S)   ((S)->vm86)
+#define CODE32(S) ((S)->code32)
+#ifdef TARGET_X86_64
+#define REX_W(S)  ((S)->vex_w)
+#define REX_R(S)  ((S)->rex_r + 0)
+#else
+#define REX_W(S)  0
+#define REX_R(S)  0
 #endif
 
 #ifdef TARGET_X86_64
@@ -140,6 +154,10 @@ typedef struct DisasContext {
     int rex_x, rex_b;
 #endif
     int vex_l;  /* vex vector length */
+    int vex_w;  /* vex.w / rex.w, new decoder only */
+    int rex_r;  /* rex.r / ~vex.r, new decoder only */
+    bool has_modrm; /* new decoder: modrm already fetched */
+    uint8_t modrm;  /* new decoder: cached modrm byte */
     int vex_v;  /* vex vvvv register, without 1's complement.  */
     int ss32;   /* 32 bit stack segment */
     CCOp cc_op;  /* current CC operation */
@@ -165,6 +183,7 @@ typedef struct DisasContext {
     int cpuid_ext2_features;
     int cpuid_ext3_features;
     int cpuid_7_0_ebx_features;
+    int cpuid_7_0_ecx_features;
     int cpuid_xsave_features;
 
     /* TCG local temps */
@@ -2324,12 +2343,12 @@ static AddressParts gen_lea_modrm_0(CPUX86State *env, DisasContext *s,
 }
 
 /* Compute the address, with a minimum number of TCG ops.  */
-static TCGv gen_lea_modrm_1(DisasContext *s, AddressParts a)
+static TCGv gen_lea_modrm_1(DisasContext *s, AddressParts a, bool is_vsib)
 {
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
     TCGv ea = NULL;
 
-    if (a.index >= 0) {
+    if (a.index >= 0 && !is_vsib) {
         if (a.scale == 0) {
             ea = tcg_ctx->cpu_regs[a.index];
         } else {
@@ -2357,7 +2376,7 @@ static TCGv gen_lea_modrm_1(DisasContext *s, AddressParts a)
 static void gen_lea_modrm(CPUX86State *env, DisasContext *s, int modrm)
 {
     AddressParts a = gen_lea_modrm_0(env, s, modrm);
-    TCGv ea = gen_lea_modrm_1(s, a);
+    TCGv ea = gen_lea_modrm_1(s, a, false);
     gen_lea_v_seg(s, s->aflag, ea, a.def_seg, s->override);
 }
 
@@ -2371,7 +2390,7 @@ static void gen_bndck(CPUX86State *env, DisasContext *s, int modrm,
                       TCGCond cond, TCGv_i64 bndv)
 {
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
-    TCGv ea = gen_lea_modrm_1(s, gen_lea_modrm_0(env, s, modrm));
+    TCGv ea = gen_lea_modrm_1(s, gen_lea_modrm_0(env, s, modrm), false);
 
     tcg_gen_extu_tl_i64(tcg_ctx, s->tmp1_i64, ea);
     if (!CODE64(s)) {
@@ -2440,6 +2459,56 @@ static inline uint32_t insn_get(CPUX86State *env, DisasContext *s, MemOp ot)
         break;
     default:
         tcg_abort();
+    }
+    return ret;
+}
+
+static target_long insn_get_signed(CPUX86State *env, DisasContext *s, MemOp ot)
+{
+    target_long ret;
+
+    switch (ot) {
+    case MO_8:
+        ret = (int8_t) x86_ldub_code(env, s);
+        break;
+    case MO_16:
+        ret = (int16_t) x86_lduw_code(env, s);
+        break;
+    case MO_32:
+        ret = (int32_t) x86_ldl_code(env, s);
+        break;
+#ifdef TARGET_X86_64
+    case MO_64:
+        ret = x86_ldq_code(env, s);
+        break;
+#endif
+    default:
+        g_assert_not_reached();
+    }
+    return ret;
+}
+
+static target_ulong insn_get_addr(CPUX86State *env, DisasContext *s, MemOp ot)
+{
+    target_ulong ret;
+
+    switch (ot) {
+    case MO_8:
+        ret = x86_ldub_code(env, s);
+        break;
+    case MO_16:
+        ret = x86_lduw_code(env, s);
+        break;
+    case MO_32:
+        ret = x86_ldl_code(env, s);
+        break;
+#ifdef TARGET_X86_64
+    case MO_64:
+        ret = x86_ldq_code(env, s);
+        break;
+#endif
+    default:
+        g_assert_not_reached();
     }
     return ret;
 }
@@ -2943,6 +3012,20 @@ static inline void gen_sto_env_A0(DisasContext *s, int offset, bool align)
     tcg_gen_addi_tl(tcg_ctx, s->tmp0, s->A0, 8);
     tcg_gen_ld_i64(tcg_ctx, s->tmp1_i64, tcg_ctx->cpu_env, offset + offsetof(ZMMReg, ZMM_Q(1)));
     tcg_gen_qemu_st_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index, MO_LEQ);
+}
+
+static void gen_ldy_env_A0(DisasContext *s, int offset, bool align)
+{
+    TCGContext *tcg_ctx = s->uc->tcg_ctx;
+    int mem_index = s->mem_index;
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        tcg_gen_addi_tl(tcg_ctx, s->tmp0, s->A0, i * 8);
+        tcg_gen_qemu_ld_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index, MO_LEQ);
+        tcg_gen_st_i64(tcg_ctx, s->tmp1_i64, tcg_ctx->cpu_env,
+                       offset + offsetof(YMMReg, YMM_Q(i)));
+    }
 }
 
 static inline void gen_op_movo(DisasContext *s, int d_offset, int s_offset)
@@ -4953,6 +5036,10 @@ static void gen_sse(CPUX86State *env, DisasContext *s, int b,
 /* convert one instruction. s->base.is_jmp is set if the translation must
    be stopped. Return the next pc value */
 
+#include "decode-new.h"
+#include "emit.c.inc"
+#include "decode-new.c.inc"
+
 // Unicorn: sync EFLAGS on demand
 static void sync_eflags(DisasContext *s, TCGContext *tcg_ctx)
 {
@@ -5114,60 +5201,22 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
         /* VEX prefixes cannot be used except in 32-bit mode.
            Otherwise the instruction is LES or LDS.  */
         if (s->code32 && !s->vm86) {
-            static const int pp_prefix[4] = {
-                0, PREFIX_DATA, PREFIX_REPZ, PREFIX_REPNZ
-            };
-            int vex3, vex2 = x86_ldub_code(env, s);
+            int vex2 = x86_ldub_code(env, s);
+            s->pc--; /* rewind: disas_insn_new re-reads the VEX payload */
 
             if (!CODE64(s) && (vex2 & 0xc0) != 0xc0) {
                 /* 4.1.4.6: In 32-bit mode, bits [7:6] must be 11b,
                    otherwise the instruction is LES or LDS.  */
-                s->pc--; /* rewind the advance_pc() x86_ldub_code() did */
                 break;
             }
-
-            /* 4.1.1-4.1.3: No preceding lock, 66, f2, f3, or rex prefixes. */
-            if (prefixes & (PREFIX_REPZ | PREFIX_REPNZ
-                            | PREFIX_LOCK | PREFIX_DATA)) {
-                goto illegal_op;
-            }
-#ifdef TARGET_X86_64
-            if (rex_byte != 0) {
-                goto illegal_op;
-            }
-#endif
-            rex_r = (~vex2 >> 4) & 8;
-            if (b == 0xc5) {
-                /* 2-byte VEX prefix: RVVVVlpp, implied 0f leading opcode byte */
-                vex3 = vex2;
-                b = x86_ldub_code(env, s) | 0x100;
-            } else {
-                /* 3-byte VEX prefix: RXBmmmmm wVVVVlpp */
-#ifdef TARGET_X86_64
-                s->rex_x = (~vex2 >> 3) & 8;
-                s->rex_b = (~vex2 >> 2) & 8;
-#endif
-                vex3 = x86_ldub_code(env, s);
-                rex_w = (vex3 >> 7) & 1;
-                switch (vex2 & 0x1f) {
-                case 0x01: /* Implied 0f leading opcode bytes.  */
-                    b = x86_ldub_code(env, s) | 0x100;
-                    break;
-                case 0x02: /* Implied 0f 38 leading opcode bytes.  */
-                    b = 0x138;
-                    break;
-                case 0x03: /* Implied 0f 3a leading opcode bytes.  */
-                    b = 0x13a;
-                    break;
-                default:   /* Reserved for future use.  */
-                    goto unknown_op;
-                }
-            }
-            s->vex_v = (~vex3 >> 3) & 0xf;
-            s->vex_l = (vex3 >> 2) & 1;
-            prefixes |= pp_prefix[vex3 & 3] | PREFIX_VEX;
+            /* Unicorn: hand over collected legacy prefixes; REX before VEX is #UD. */
+            s->prefix = prefixes | (rex_byte ? PREFIX_REX : 0);
+            s->vex_w = 0;
+            s->rex_r = 0;
+            disas_insn_new(s, cpu, b);
+            /* Must not return directly: the UC_HOOK_CODE size patch lives below. */
+            goto insn_epilogue;
         }
-        prefix_count++;
         break;
     }
 
@@ -6263,7 +6312,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
         reg = ((modrm >> 3) & 7) | rex_r;
         {
             AddressParts a = gen_lea_modrm_0(env, s, modrm);
-            TCGv ea = gen_lea_modrm_1(s, a);
+            TCGv ea = gen_lea_modrm_1(s, a, false);
             gen_lea_v_seg(s, s->aflag, ea, -1, -1);
             gen_op_mov_reg_v(s, dflag, reg, s->A0);
         }
@@ -6526,7 +6575,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
             if (mod != 3) {
                 /* memory op */
                 AddressParts a = gen_lea_modrm_0(env, s, modrm);
-                TCGv ea = gen_lea_modrm_1(s, a);
+                TCGv ea = gen_lea_modrm_1(s, a, false);
                 TCGv last_addr = tcg_temp_new(tcg_ctx);
                 bool update_fdp = true;
 
@@ -7666,7 +7715,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
             gen_exts(tcg_ctx, ot, s->T1);
             tcg_gen_sari_tl(tcg_ctx, s->tmp0, s->T1, 3 + ot);
             tcg_gen_shli_tl(tcg_ctx, s->tmp0, s->tmp0, ot);
-            tcg_gen_add_tl(tcg_ctx, s->A0, gen_lea_modrm_1(s, a), s->tmp0);
+            tcg_gen_add_tl(tcg_ctx, s->A0, gen_lea_modrm_1(s, a, false), s->tmp0);
             gen_lea_v_seg(s, s->aflag, s->A0, a.def_seg, s->override);
             if (!(s->prefix & PREFIX_LOCK)) {
                 gen_op_ld_v(s, ot, s->T0, s->A0);
@@ -8805,7 +8854,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
                     /* rip-relative generates #ud */
                     goto illegal_op;
                 }
-                tcg_gen_not_tl(tcg_ctx, s->A0, gen_lea_modrm_1(s, a));
+                tcg_gen_not_tl(tcg_ctx, s->A0, gen_lea_modrm_1(s, a, false));
                 if (!CODE64(s)) {
                     tcg_gen_ext32u_tl(tcg_ctx, s->A0, s->A0);
                 }
@@ -9346,6 +9395,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
         goto unknown_op;
     }
 
+ insn_epilogue:
     if (insn_hook) {
         // Unicorn: patch the callback to have the proper instruction size.
         if (prev_op) {
@@ -9486,6 +9536,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cpuid_ext2_features = env->features[FEAT_8000_0001_EDX];
     dc->cpuid_ext3_features = env->features[FEAT_8000_0001_ECX];
     dc->cpuid_7_0_ebx_features = env->features[FEAT_7_0_EBX];
+    dc->cpuid_7_0_ecx_features = env->features[FEAT_7_0_ECX];
     dc->cpuid_xsave_features = env->features[FEAT_XSAVE];
 #ifdef TARGET_X86_64
     dc->lma = (flags >> HF_LMA_SHIFT) & 1;
