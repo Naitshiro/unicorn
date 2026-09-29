@@ -1284,6 +1284,16 @@ static void gen_MOVDQ(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
     gen_store_sse(s, decode, decode->op[2].offset);
 }
 
+static void gen_MOVNTDQ(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
+{
+    /* Unicorn: MOVNTQ/MOVNTDQ have no register form (upstream still accepts it). */
+    if (!decode->op[0].has_ea) {
+        gen_illegal_opcode(s);
+        return;
+    }
+    gen_MOVDQ(s, env, decode);
+}
+
 static void gen_MOVMSK(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
 {
     TCGContext *tcg_ctx = s->uc->tcg_ctx;

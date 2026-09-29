@@ -2747,6 +2747,32 @@ static void test_x86_3dnow(void)
     OK(uc_close(uc));
 }
 
+// MOVBE follows the operand size (REX.W beats 0x66); MOVNTQ/MOVNTDQ/VMOVNTDQ have no register form.
+static void test_x86_movbe_movnt_forms(void)
+{
+    uc_engine *uc;
+    char movbe[] = "\x66\x48\x0f\x38\xf0\x03"; // movbe rax, [rbx]
+    const char *bad[] = {"\x0f\xe7\xc1", "\x66\x0f\xe7\xc1", "\xc5\xf9\xe7\xc1"};
+    uint64_t rbx = 0x3000, rax, val = 0x0102030405060708ULL;
+    int i;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, movbe, sizeof(movbe) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    OK(uc_mem_write(uc, rbx, &val, sizeof(val)));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(movbe) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    TEST_CHECK(rax == 0x0807060504030201ULL);
+    TEST_MSG("rax=%016" PRIx64, rax);
+    OK(uc_close(uc));
+
+    for (i = 0; i < 3; i++) {
+        size_t n = strlen(bad[i]);
+        uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, bad[i], n);
+        uc_assert_err(UC_ERR_INSN_INVALID, uc_emu_start(uc, code_start, code_start + n, 0, 0));
+        OK(uc_close(uc));
+    }
+}
+
 TEST_LIST = {
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
@@ -2828,4 +2854,5 @@ TEST_LIST = {
     {"test_x86_mem_hooks_pc_guarantee", test_x86_mem_hooks_pc_guarantee},
     {"test_x86_xrstor_sse_keeps_ymmh", test_x86_xrstor_sse_keeps_ymmh},
     {"test_x86_3dnow", test_x86_3dnow},
+    {"test_x86_movbe_movnt_forms", test_x86_movbe_movnt_forms},
     {NULL, NULL}};

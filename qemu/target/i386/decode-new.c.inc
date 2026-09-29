@@ -324,6 +324,14 @@ static void decode_0F7F(DisasContext *s, CPUX86State *env, X86OpEntry *entry, ui
     *entry = *decode_by_prefix(s, opcodes_0F7F);
 }
 
+/* Unicorn: these SSE forms have no VEX class, so validate_vex never checks CR4.OSFXSR. */
+static void require_osfxsr(DisasContext *s, X86OpEntry *entry)
+{
+    if (!(s->flags & HF_OSFXSR_MASK) && !(s->prefix & PREFIX_VEX)) {
+        memset(entry, 0, sizeof(*entry));
+    }
+}
+
 static void decode_0FD6(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)
 {
     static const X86OpEntry movq[4] = {
@@ -334,6 +342,7 @@ static void decode_0FD6(DisasContext *s, CPUX86State *env, X86OpEntry *entry, ui
     };
 
     *entry = *decode_by_prefix(s, movq);
+    require_osfxsr(s, entry);
 }
 
 static const X86OpEntry opcodes_0F38_00toEF[240] = {
@@ -390,10 +399,10 @@ static const X86OpEntry opcodes_0F38_00toEF[240] = {
     [0x09] = X86_OP_ENTRY3(PSIGNW,    V,x,        H,x,  W,x,  vex4 cpuid(SSSE3) mmx avx2_256 p_00_66),
     [0x0a] = X86_OP_ENTRY3(PSIGND,    V,x,        H,x,  W,x,  vex4 cpuid(SSSE3) mmx avx2_256 p_00_66),
     [0x0b] = X86_OP_ENTRY3(PMULHRSW,  V,x,        H,x,  W,x,  vex4 cpuid(SSSE3) mmx avx2_256 p_00_66),
-    [0x0c] = X86_OP_ENTRY3(VPERMILPS, V,x,        H,x,  W,x,  vex4 cpuid(AVX) p_66),
-    [0x0d] = X86_OP_ENTRY3(VPERMILPD, V,x,        H,x,  W,x,  vex4 cpuid(AVX) p_66),
-    [0x0e] = X86_OP_ENTRY3(VTESTPS,   None,None,  V,x,  W,x,  vex4 cpuid(AVX) p_66),
-    [0x0f] = X86_OP_ENTRY3(VTESTPD,   None,None,  V,x,  W,x,  vex4 cpuid(AVX) p_66),
+    [0x0c] = X86_OP_ENTRY3(VPERMILPS, V,x,        H,x,  W,x,  vex6 cpuid(AVX) p_66),
+    [0x0d] = X86_OP_ENTRY3(VPERMILPD, V,x,        H,x,  W,x,  vex6 cpuid(AVX) p_66),
+    [0x0e] = X86_OP_ENTRY3(VTESTPS,   None,None,  V,x,  W,x,  vex6 cpuid(AVX) p_66),
+    [0x0f] = X86_OP_ENTRY3(VTESTPD,   None,None,  V,x,  W,x,  vex6 cpuid(AVX) p_66),
 
     [0x18] = X86_OP_ENTRY3(VPBROADCASTD,   V,x,  None,None, W,d,  vex6 cpuid(AVX) p_66), /* vbroadcastss */
     [0x19] = X86_OP_ENTRY3(VPBROADCASTQ,   V,qq, None,None, W,q,  vex6 cpuid(AVX) p_66), /* vbroadcastsd */
@@ -440,19 +449,20 @@ static const X86OpEntry opcodes_0F38_00toEF[240] = {
 
 /* five rows for no prefix, 66, F3, F2, 66+F2  */
 static const X86OpEntry opcodes_0F38_F0toFF[16][5] = {
+    /* Unicorn: MOVBE and 66+F2 CRC32 use the operand size, so REX.W beats 0x66 (as upstream master). */
     [0] = {
-        X86_OP_ENTRY3(MOVBE, G,y, M,y, None,None, cpuid(MOVBE)),
-        X86_OP_ENTRY3(MOVBE, G,w, M,w, None,None, cpuid(MOVBE)),
+        X86_OP_ENTRY3(MOVBE, G,v, M,v, None,None, cpuid(MOVBE)),
+        X86_OP_ENTRY3(MOVBE, G,v, M,v, None,None, cpuid(MOVBE)),
         {},
         X86_OP_ENTRY2(CRC32, G,d, E,b, cpuid(SSE42)),
         X86_OP_ENTRY2(CRC32, G,d, E,b, cpuid(SSE42)),
     },
     [1] = {
-        X86_OP_ENTRY3(MOVBE, M,y, G,y, None,None, cpuid(MOVBE)),
-        X86_OP_ENTRY3(MOVBE, M,w, G,w, None,None, cpuid(MOVBE)),
+        X86_OP_ENTRY3(MOVBE, M,v, G,v, None,None, cpuid(MOVBE)),
+        X86_OP_ENTRY3(MOVBE, M,v, G,v, None,None, cpuid(MOVBE)),
         {},
         X86_OP_ENTRY2(CRC32, G,d, E,y, cpuid(SSE42)),
-        X86_OP_ENTRY2(CRC32, G,d, E,w, cpuid(SSE42)),
+        X86_OP_ENTRY2(CRC32, G,d, E,v, cpuid(SSE42)),
     },
     [2] = {
         X86_OP_ENTRY3(ANDN, G,y, B,y, E,y, vex13 cpuid(BMI1)),
@@ -715,6 +725,7 @@ static void decode_0F2A(DisasContext *s, CPUX86State *env, X86OpEntry *entry, ui
         X86_OP_ENTRY3(VCVTSI2Sx, V,x,  H,x, E,y,        vex3),
     };
     *entry = *decode_by_prefix(s, opcodes_0F2A);
+    require_osfxsr(s, entry);
 }
 
 static void decode_0F2B(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)
@@ -740,6 +751,7 @@ static void decode_0F2C(DisasContext *s, CPUX86State *env, X86OpEntry *entry, ui
         X86_OP_ENTRY3(VCVTTSx2SI, G,y,  None,None, W,sd, vex3),
     };
     *entry = *decode_by_prefix(s, opcodes_0F2C);
+    require_osfxsr(s, entry);
 }
 
 static void decode_0F2D(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)
@@ -752,6 +764,7 @@ static void decode_0F2D(DisasContext *s, CPUX86State *env, X86OpEntry *entry, ui
         X86_OP_ENTRY3(VCVTSx2SI, G,y,  None,None, W,sd, vex3),
     };
     *entry = *decode_by_prefix(s, opcodes_0F2D);
+    require_osfxsr(s, entry);
 }
 
 static void decode_VxCOMISx(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)
@@ -907,7 +920,7 @@ static const X86OpEntry opcodes_0F[256] = {
     [0xe4] = X86_OP_ENTRY3(PMULHUW,   V,x, H,x, W,x,        vex4 mmx avx2_256 p_00_66),
     [0xe5] = X86_OP_ENTRY3(PMULHW,    V,x, H,x, W,x,        vex4 mmx avx2_256 p_00_66),
     [0xe6] = X86_OP_GROUP0(0FE6),
-    [0xe7] = X86_OP_ENTRY3(MOVDQ,     W,x, None,None, V,x,  vex1 mmx p_00_66), /* MOVNTQ/MOVNTDQ */
+    [0xe7] = X86_OP_ENTRY3(MOVNTDQ,   W,x, None,None, V,x,  vex1 mmx p_00_66), /* MOVNTQ/MOVNTDQ */
 
     [0xf0] = X86_OP_ENTRY3(MOVDQ,    V,x, None,None, WM,x,  vex4_unal cpuid(SSE3) p_f2), /* LDDQU */
     [0xf1] = X86_OP_ENTRY3(PSLLW_r,  V,x, H,x, W,x,         vex7 mmx avx2_256 p_00_66),
