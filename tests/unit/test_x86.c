@@ -2426,7 +2426,7 @@ static void test_x86_bmi_new_decoder_semantics(void)
     OK(uc_close(uc));
 }
 
-// CPUID must advertise AVX/AVX2/FMA (and OSXSAVE) now that VEX decode backs them; F16C comes next.
+// CPUID must advertise AVX/AVX2/FMA/F16C (and OSXSAVE) now that VEX decode backs them.
 static void test_x86_avx_cpuid_xcr0(void)
 {
     uc_engine *uc;
@@ -2451,7 +2451,7 @@ static void test_x86_avx_cpuid_xcr0(void)
     TEST_CHECK((r8 >> 28) & 1);    // CPUID.1:ECX.AVX
     TEST_CHECK((r8 >> 27) & 1);    // CPUID.1:ECX.OSXSAVE
     TEST_CHECK((r8 >> 12) & 1);    // CPUID.1:ECX.FMA
-    TEST_CHECK(!((r8 >> 29) & 1)); // CPUID.1:ECX.F16C (Phase 5)
+    TEST_CHECK((r8 >> 29) & 1);    // CPUID.1:ECX.F16C
     TEST_CHECK((r9 >> 5) & 1);     // CPUID.(7,0):EBX.AVX2
     TEST_MSG("cpuid.1.ecx=%08" PRIx64 " cpuid.7.ebx=%08" PRIx64, r8, r9);
     TEST_CHECK((rax & 0xffffffff) == 7 && (rdx & 0xffffffff) == 0); // XCR0 = x87|SSE|YMM
@@ -2871,6 +2871,57 @@ static void test_x86_fma(void)
     OK(uc_close(uc));
 }
 
+// F16C both directions, register and memory forms, imm8 rounding override (round down: 65520 -> 65504) and
+// MXCSR rounding (65520 -> inf). DAZ/FTZ are set: hardware ignores both for half-precision data (i7-14700).
+static void test_x86_f16c(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\x62\x7d\x13\xf1"          // vcvtph2ps ymm14, xmm1
+                  "\xc4\xc3\x7d\x1d\xd7\x01"      // vcvtps2ph xmm15, ymm2, 1
+                  "\xc4\xe3\x79\x1d\x53\x20\x04"  // vcvtps2ph [rbx+0x20], xmm2, 4
+                  "\xc4\xe2\x79\x13\x23";         // vcvtph2ps xmm4, [rbx]
+    static const uint64_t y1[4] = {0x400000003f800001ULL, 0x7149f2cabfc00000ULL, 0xc00000003eaaaaabULL,
+                                   0x33d6bf95477fe000ULL};
+    static const uint64_t y2[4] = {0x404000003f800001ULL, 0x501502f940200000ULL, 0x477ff0003eaaaaabULL,
+                                   0xbdcccccd358637bdULL};
+    static const uint64_t junk[4] = {0xa5a5a5a5a5a5a5a5ULL, 0xa5a5a5a5a5a5a5a5ULL, 0xa5a5a5a5a5a5a5a5ULL,
+                                     0xa5a5a5a5a5a5a5a5ULL};
+    static const uint64_t e4[4] = {0x0000000034000000ULL, 0xbffe000000000000ULL, 0, 0};
+    static const uint64_t e14[4] = {0x3ff0000033800000ULL, 0x4000000000000000ULL, 0xbff8000000000000ULL,
+                                    0x46292000c6594000ULL};
+    static const uint64_t e15[4] = {0x7bff410042003c00ULL, 0xae6700107bff3555ULL, 0, 0};
+    uint64_t mem[6] = {0xbff0000000000002ULL, 0x3ff0000000000000ULL, 0x3fe0000000000000ULL,
+                       0x000012688b70e62bULL, 0xccccccccccccccccULL, 0xccccccccccccccccULL};
+    uint64_t rbx = 0x3000, ymm[4];
+    uint32_t mxcsr = 0x9fc0; // FTZ | DAZ, all exceptions masked
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, rbx, mem, sizeof(mem)));
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    OK(uc_reg_write(uc, UC_X86_REG_MXCSR, &mxcsr));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM1, y1));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM2, y2));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM4, junk));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM14, junk));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM15, junk));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+
+    OK(uc_reg_read(uc, UC_X86_REG_YMM4, ymm));
+    TEST_CHECK(memcmp(ymm, e4, sizeof(ymm)) == 0);
+    TEST_MSG("ymm4 = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, ymm[3], ymm[2], ymm[1], ymm[0]);
+    OK(uc_reg_read(uc, UC_X86_REG_YMM14, ymm));
+    TEST_CHECK(memcmp(ymm, e14, sizeof(ymm)) == 0); // lane 0: half denormal 0x0001 despite DAZ
+    TEST_MSG("ymm14 = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, ymm[3], ymm[2], ymm[1], ymm[0]);
+    OK(uc_reg_read(uc, UC_X86_REG_YMM15, ymm));
+    TEST_CHECK(memcmp(ymm, e15, sizeof(ymm)) == 0); // lane 6: half denormal 0x0010 despite FTZ
+    TEST_MSG("ymm15 = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, ymm[3], ymm[2], ymm[1], ymm[0]);
+    OK(uc_mem_read(uc, rbx, mem, sizeof(mem)));
+    TEST_CHECK(mem[4] == 0x7c00410042003c00ULL && mem[5] == 0xccccccccccccccccULL); // 8-byte store only
+    TEST_MSG("mem[4]=%016" PRIx64 " mem[5]=%016" PRIx64, mem[4], mem[5]);
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
@@ -2955,4 +3006,5 @@ TEST_LIST = {
     {"test_x86_movbe_movnt_forms", test_x86_movbe_movnt_forms},
     {"test_x86_legacy_sse_new_decoder", test_x86_legacy_sse_new_decoder},
     {"test_x86_fma", test_x86_fma},
+    {"test_x86_f16c", test_x86_f16c},
     {NULL, NULL}};

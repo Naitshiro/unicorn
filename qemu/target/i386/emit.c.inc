@@ -304,7 +304,8 @@ static void gen_writeback(DisasContext *s, X86DecodedInsn *decode, int opn, TCGv
     case X86_OP_MMX:
         break;
     case X86_OP_SSE:
-        if (!op->has_ea && (s->prefix & PREFIX_VEX) && op->ot == MO_128) {
+        /* Unicorn: <= as in upstream master, so a 64-bit VCVTPS2PH register result clears 255:128 too. */
+        if (!op->has_ea && (s->prefix & PREFIX_VEX) && op->ot <= MO_128) {
             tcg_gen_gvec_dup_imm(tcg_ctx, MO_64,
                                  offsetof(CPUX86State, xmm_regs[op->n].ZMM_X(1)),
                                  16, 16, 0);
@@ -910,6 +911,8 @@ UNARY_INT_SSE(VPMOVZXBQ,    pmovzxbq)
 UNARY_INT_SSE(VPMOVZXWD,    pmovzxwd)
 UNARY_INT_SSE(VPMOVZXWQ,    pmovzxwq)
 UNARY_INT_SSE(VPMOVZXDQ,    pmovzxdq)
+
+UNARY_INT_SSE(VCVTPH2PS, cvtph2ps)
 
 UNARY_INT_SSE(VMOVSLDUP,    pmovsldup)
 UNARY_INT_SSE(VMOVSHDUP,    pmovshdup)
@@ -2004,6 +2007,20 @@ static void gen_VCOMI(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
     fn = s->prefix & PREFIX_DATA ? gen_helper_comisd : gen_helper_comiss;
     fn(tcg_ctx, tcg_ctx->cpu_env, OP_PTR1, OP_PTR2);
     set_cc_op(s, CC_OP_EFLAGS);
+}
+
+static void gen_VCVTPS2PH(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
+{
+    gen_unary_imm_fp_sse(s, env, decode,
+                      gen_helper_cvtps2ph_xmm,
+                      gen_helper_cvtps2ph_ymm);
+    /*
+     * VCVTPS2PH is the only instruction that performs an operation on a
+     * register source and then *stores* into memory.
+     */
+    if (decode->op[0].has_ea) {
+        gen_store_sse(s, decode, decode->op[0].offset);
+    }
 }
 
 static void gen_VCVTfp2fp(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)

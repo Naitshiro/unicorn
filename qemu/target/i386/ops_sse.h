@@ -586,6 +586,57 @@ void glue(helper_cvtpd2ps, SUFFIX)(CPUX86State *env, Reg *d, Reg *s)
     }
 }
 
+#if SHIFT >= 1
+/* Unicorn: MXCSR.DAZ does not apply to half-precision inputs (verified on hardware). */
+void glue(helper_cvtph2ps, SUFFIX)(CPUX86State *env, Reg *d, Reg *s)
+{
+    flag prev_daz = get_flush_inputs_to_zero(&env->sse_status);
+    int i;
+
+    set_flush_inputs_to_zero(0, &env->sse_status);
+    for (i = 2 << SHIFT; --i >= 0; ) {
+         d->ZMM_S(i) = float16_to_float32(s->ZMM_H(i), true, &env->sse_status);
+    }
+    set_flush_inputs_to_zero(prev_daz, &env->sse_status);
+}
+
+/* Unicorn: MXCSR.FTZ does not apply to half-precision results (verified on hardware). */
+void glue(helper_cvtps2ph, SUFFIX)(CPUX86State *env, Reg *d, Reg *s, int mode)
+{
+    signed char prev_rounding_mode = env->sse_status.float_rounding_mode;
+    flag prev_ftz = get_flush_to_zero(&env->sse_status);
+    int i;
+
+    if (!(mode & (1 << 2))) {
+        switch (mode & 3) {
+        case 0:
+            set_float_rounding_mode(float_round_nearest_even, &env->sse_status);
+            break;
+        case 1:
+            set_float_rounding_mode(float_round_down, &env->sse_status);
+            break;
+        case 2:
+            set_float_rounding_mode(float_round_up, &env->sse_status);
+            break;
+        case 3:
+            set_float_rounding_mode(float_round_to_zero, &env->sse_status);
+            break;
+        }
+    }
+    set_flush_to_zero(0, &env->sse_status);
+
+    for (i = 0; i < 2 << SHIFT; i++) {
+        d->ZMM_H(i) = float32_to_float16(s->ZMM_S(i), true, &env->sse_status);
+    }
+    for (i >>= 2; i < 1 << SHIFT; i++) {
+        d->Q(i) = 0;
+    }
+
+    set_flush_to_zero(prev_ftz, &env->sse_status);
+    env->sse_status.float_rounding_mode = prev_rounding_mode;
+}
+#endif
+
 #if SHIFT == 1
 void helper_cvtss2sd(CPUX86State *env, Reg *d, Reg *v, Reg *s)
 {

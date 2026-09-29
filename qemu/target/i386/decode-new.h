@@ -81,6 +81,7 @@ typedef enum X86OpSize {
     X86_SIZE_dq, /* SSE/AVX 128-bit */
     X86_SIZE_p,  /* Far pointer */
     X86_SIZE_pd, /* SSE/AVX packed double precision */
+    X86_SIZE_ph, /* SSE/AVX packed half precision */
     X86_SIZE_pi, /* MMX */
     X86_SIZE_ps, /* SSE/AVX packed single precision */
     X86_SIZE_q,  /* 64-bit */
@@ -110,6 +111,7 @@ typedef enum X86CPUIDFeature {
     X86_FEAT_AVX2,
     X86_FEAT_BMI1,
     X86_FEAT_BMI2,
+    X86_FEAT_F16C,
     X86_FEAT_FMA,
     X86_FEAT_MOVBE,
     X86_FEAT_PCLMULQDQ,
