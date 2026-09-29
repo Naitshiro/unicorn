@@ -2773,6 +2773,44 @@ static void test_x86_movbe_movnt_forms(void)
     }
 }
 
+// Legacy SSE/MMX now runs on the new decoder: MMX works with CR4.OSFXSR=0 (upstream 38e65936) while SSE
+// forms #UD, and SSE4.1-only 0F 38 opcodes without 0x66 #UD instead of crashing the old gen_sse.
+static void test_x86_legacy_sse_new_decoder_run(const char *code, size_t n, bool osfxsr, uc_err expect,
+                                                uint64_t *mm0)
+{
+    uc_engine *uc;
+    uint8_t st[10] = {0};
+    uint64_t cr4, a = 0x0000000200000001ULL, b = 0x0000001000000020ULL;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, n);
+    OK(uc_reg_read(uc, UC_X86_REG_CR4, &cr4));
+    cr4 = osfxsr ? (cr4 | (1ULL << 9)) : (cr4 & ~(1ULL << 9));
+    OK(uc_reg_write(uc, UC_X86_REG_CR4, &cr4));
+    memcpy(st, &a, 8);
+    OK(uc_reg_write(uc, UC_X86_REG_ST0, st));
+    memcpy(st, &b, 8);
+    OK(uc_reg_write(uc, UC_X86_REG_ST1, st));
+    uc_assert_err(expect, uc_emu_start(uc, code_start, code_start + n, 0, 0));
+    if (mm0) {
+        OK(uc_reg_read(uc, UC_X86_REG_ST0, st));
+        memcpy(mm0, st, 8);
+    }
+    OK(uc_close(uc));
+}
+
+static void test_x86_legacy_sse_new_decoder(void)
+{
+    uint64_t mm0 = 0;
+
+    test_x86_legacy_sse_new_decoder_run("\x0f\xfe\xc1", 3, false, UC_ERR_OK, &mm0); // paddd mm0, mm1
+    TEST_CHECK(mm0 == 0x0000001200000021ULL);
+    TEST_MSG("mm0=%016" PRIx64, mm0);
+    test_x86_legacy_sse_new_decoder_run("\x0f\x58\xc1", 3, false, UC_ERR_INSN_INVALID, NULL); // addps
+    test_x86_legacy_sse_new_decoder_run("\x0f\x2a\xc1", 3, false, UC_ERR_INSN_INVALID, NULL); // cvtpi2ps
+    test_x86_legacy_sse_new_decoder_run("\x0f\x38\x20\xc1", 4, true, UC_ERR_INSN_INVALID, NULL); // no MMX pmovsxbw
+    test_x86_legacy_sse_new_decoder_run("\x0f\x3a\x0e\xc1\x00", 5, true, UC_ERR_INSN_INVALID, NULL); // no MMX pblendw
+}
+
 TEST_LIST = {
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
@@ -2855,4 +2893,5 @@ TEST_LIST = {
     {"test_x86_xrstor_sse_keeps_ymmh", test_x86_xrstor_sse_keeps_ymmh},
     {"test_x86_3dnow", test_x86_3dnow},
     {"test_x86_movbe_movnt_forms", test_x86_movbe_movnt_forms},
+    {"test_x86_legacy_sse_new_decoder", test_x86_legacy_sse_new_decoder},
     {NULL, NULL}};
