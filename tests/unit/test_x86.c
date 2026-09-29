@@ -3272,6 +3272,62 @@ static void test_x86_avx_align_intr_cb(uc_engine *uc, uint32_t intno,
     uc_emu_stop(uc);
 }
 
+static void test_x86_avx_alignment(void)
+{
+    static const struct {
+        const char *name;
+        const char *code;
+        int len;
+        uint64_t rcx;
+        int intno; // -1: no exception
+    } cases[] = {
+        {"vmovdqa ymm load", "\xc5\xfd\x6f\x01", 4, 0x3010, 13},
+        {"vmovdqa ymm load aligned", "\xc5\xfd\x6f\x01", 4, 0x3020, -1},
+        {"vmovdqa ymm store", "\xc5\xfd\x7f\x01", 4, 0x3010, 13},
+        {"vmovaps ymm load", "\xc5\xfc\x28\x01", 4, 0x3010, 13},
+        {"vmovapd ymm store", "\xc5\xfd\x29\x01", 4, 0x3010, 13},
+        {"vmovntdq ymm", "\xc5\xfd\xe7\x01", 4, 0x3010, 13},
+        {"vmovntps ymm", "\xc5\xfc\x2b\x01", 4, 0x3010, 13},
+        {"vmovntdqa ymm", "\xc4\xe2\x7d\x2a\x01", 5, 0x3010, 13},
+        {"vmovdqa xmm load", "\xc5\xf9\x6f\x01", 4, 0x3008, 13},
+        {"vmovdqa xmm load aligned", "\xc5\xf9\x6f\x01", 4, 0x3010, -1},
+        {"vmovdqu ymm load", "\xc5\xfe\x6f\x01", 4, 0x3001, -1},
+        {"vmovups ymm store", "\xc5\xfc\x11\x01", 4, 0x3001, -1},
+        {"vpaddb ymm mem", "\xc5\xfd\xfc\x01", 4, 0x3001, -1},
+        {"vaddps xmm mem", "\xc5\xf8\x58\x01", 4, 0x3001, -1},
+        {"vlddqu ymm", "\xc5\xff\xf0\x01", 4, 0x3001, -1},
+        {"movdqa load", "\x66\x0f\x6f\x01", 4, 0x3008, 13},
+        {"movaps store", "\x0f\x29\x01", 3, 0x3008, 13},
+        {"movntdq", "\x66\x0f\xe7\x01", 4, 0x3008, 13},
+        {"paddb mem", "\x66\x0f\xfc\x01", 4, 0x3008, 13},
+        {"addps mem", "\x0f\x58\x01", 3, 0x3008, 13},
+        {"movdqu load", "\xf3\x0f\x6f\x01", 4, 0x3001, -1},
+        {"addss mem", "\xf3\x0f\x58\x01", 4, 0x3001, -1},
+        {"lddqu", "\xf2\x0f\xf0\x01", 4, 0x3001, -1},
+    };
+    uc_engine *uc;
+    uc_hook h;
+    uint8_t zero[0x100] = {0};
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int intno = -1;
+        uint64_t rcx = cases[i].rcx;
+
+        uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, cases[i].code,
+                        cases[i].len);
+        OK(uc_mem_write(uc, 0x3000, zero, sizeof(zero)));
+        OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+        OK(uc_hook_add(uc, &h, UC_HOOK_INTR, test_x86_avx_align_intr_cb,
+                       &intno, 1, 0));
+        OK(uc_emu_start(uc, code_start, code_start + cases[i].len, 0, 0));
+        TEST_CHECK(intno == cases[i].intno);
+        TEST_MSG("%s: intno %d, expected %d", cases[i].name, intno,
+                 cases[i].intno);
+        OK(uc_close(uc));
+    }
+}
+
 static void test_x86_avx_state_api(void)
 {
     uc_engine *uc;
@@ -3453,6 +3509,7 @@ TEST_LIST = {
     {"test_x86_vzeroupper_hook_code", test_x86_vzeroupper_hook_code},
     {"test_x86_avx_mem_hooks", test_x86_avx_mem_hooks},
     {"test_x86_avx_page_cross", test_x86_avx_page_cross},
+    {"test_x86_avx_alignment", test_x86_avx_alignment},
     {"test_x86_avx_state_api", test_x86_avx_state_api},
     {"test_x86_avx_xcr0_cr4", test_x86_avx_xcr0_cr4},
     {NULL, NULL}};

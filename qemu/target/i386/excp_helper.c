@@ -672,6 +672,16 @@ do_check_protect_pse36:
     return 1;
 }
 
+/* Misaligned operand of an alignment-checked SSE/AVX access: #GP(0). */
+void x86_cpu_do_unaligned_access(CPUState *cs, vaddr vaddr,
+                                 MMUAccessType access_type,
+                                 int mmu_idx, uintptr_t retaddr)
+{
+    X86CPU *cpu = X86_CPU(cs);
+
+    raise_exception_ra(&cpu->env, EXCP0D_GPF, retaddr);
+}
+
 bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                       MMUAccessType access_type, int mmu_idx,
                       bool probe, uintptr_t retaddr)

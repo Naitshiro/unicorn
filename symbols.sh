@@ -1339,6 +1339,7 @@ raise_exception_err_ra \
 raise_exception \
 raise_exception_ra \
 x86_cpu_tlb_fill \
+x86_cpu_do_unaligned_access \
 cpu_set_ignne \
 helper_flds_FT0 \
 helper_fldl_FT0 \

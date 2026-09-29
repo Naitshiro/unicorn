@@ -2993,7 +2993,8 @@ static inline void gen_ldo_env_A0(DisasContext *s, int offset, bool align)
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
     int mem_index = s->mem_index;
 
-    tcg_gen_qemu_ld_i64(tcg_ctx, s->tmp1_i64, s->A0, mem_index, MO_LEQ);
+    tcg_gen_qemu_ld_i64(tcg_ctx, s->tmp1_i64, s->A0, mem_index,
+                        MO_LEQ | (align ? MO_ALIGN_16 : 0));
     tcg_gen_st_i64(tcg_ctx, s->tmp1_i64, tcg_ctx->cpu_env, offset + offsetof(ZMMReg, ZMM_Q(0)));
     tcg_gen_addi_tl(tcg_ctx, s->tmp0, s->A0, 8);
     tcg_gen_qemu_ld_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index, MO_LEQ);
@@ -3006,7 +3007,8 @@ static inline void gen_sto_env_A0(DisasContext *s, int offset, bool align)
     int mem_index = s->mem_index;
 
     tcg_gen_ld_i64(tcg_ctx, s->tmp1_i64, tcg_ctx->cpu_env, offset + offsetof(ZMMReg, ZMM_Q(0)));
-    tcg_gen_qemu_st_i64(tcg_ctx, s->tmp1_i64, s->A0, mem_index, MO_LEQ);
+    tcg_gen_qemu_st_i64(tcg_ctx, s->tmp1_i64, s->A0, mem_index,
+                        MO_LEQ | (align ? MO_ALIGN_16 : 0));
     tcg_gen_addi_tl(tcg_ctx, s->tmp0, s->A0, 8);
     tcg_gen_ld_i64(tcg_ctx, s->tmp1_i64, tcg_ctx->cpu_env, offset + offsetof(ZMMReg, ZMM_Q(1)));
     tcg_gen_qemu_st_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index, MO_LEQ);
@@ -3020,7 +3022,8 @@ static void gen_ldy_env_A0(DisasContext *s, int offset, bool align)
 
     for (i = 0; i < 4; i++) {
         tcg_gen_addi_tl(tcg_ctx, s->tmp0, s->A0, i * 8);
-        tcg_gen_qemu_ld_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index, MO_LEQ);
+        tcg_gen_qemu_ld_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index,
+                            MO_LEQ | (i == 0 && align ? MO_ALIGN_32 : 0));
         tcg_gen_st_i64(tcg_ctx, s->tmp1_i64, tcg_ctx->cpu_env,
                        offset + offsetof(YMMReg, YMM_Q(i)));
     }
@@ -3036,7 +3039,8 @@ static void gen_sty_env_A0(DisasContext *s, int offset, bool align)
         tcg_gen_ld_i64(tcg_ctx, s->tmp1_i64, tcg_ctx->cpu_env,
                        offset + offsetof(YMMReg, YMM_Q(i)));
         tcg_gen_addi_tl(tcg_ctx, s->tmp0, s->A0, i * 8);
-        tcg_gen_qemu_st_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index, MO_LEQ);
+        tcg_gen_qemu_st_i64(tcg_ctx, s->tmp1_i64, s->tmp0, mem_index,
+                            MO_LEQ | (i == 0 && align ? MO_ALIGN_32 : 0));
     }
 }
 
