@@ -2596,6 +2596,41 @@ static void test_x86_avx_vinsertf128_repro(void)
     OK(uc_close(uc));
 }
 
+// VLDMXCSR/VSTMXCSR (upstream 57f6bba0) round-trip through legacy STMXCSR; VEX.L=1 and vvvv!=1111 are #UD.
+static void test_x86_avx_vldmxcsr_vstmxcsr(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc5\xf8\xae\x10"      // vldmxcsr [rax]
+                  "\xc5\xf8\xae\x58\x04"  // vstmxcsr [rax+4]
+                  "\x0f\xae\x58\x08";     // stmxcsr [rax+8]
+    char bad_l[] = "\xc5\xfc\xae\x10";    // vldmxcsr [rax] with VEX.L=1
+    char bad_v[] = "\xc5\xf0\xae\x58\x04"; // vstmxcsr [rax+4] with vvvv=0001
+    uint64_t rax = 0x3000, mxcsr;
+    uint32_t in = 0x3f80, out[2];
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_mem_write(uc, 0x3000, &in, sizeof(in)));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_mem_read(uc, 0x3004, out, sizeof(out)));
+    OK(uc_reg_read(uc, UC_X86_REG_MXCSR, &mxcsr));
+    TEST_CHECK(out[0] == in && out[1] == in && (mxcsr & 0xffffffff) == in);
+    TEST_MSG("vstmxcsr=%08x stmxcsr=%08x mxcsr=%08" PRIx64, out[0], out[1], mxcsr);
+    OK(uc_close(uc));
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, bad_l, sizeof(bad_l) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    uc_assert_err(UC_ERR_INSN_INVALID,
+                  uc_emu_start(uc, code_start, code_start + sizeof(bad_l) - 1, 0, 0));
+    OK(uc_close(uc));
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, bad_v, sizeof(bad_v) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    uc_assert_err(UC_ERR_INSN_INVALID,
+                  uc_emu_start(uc, code_start, code_start + sizeof(bad_v) - 1, 0, 0));
+    OK(uc_close(uc));
+}
+
 // BZHI with index >= operand size must return the source unchanged and set CF (upstream 9ad2ba6e8e).
 // Expected values captured from native hardware.
 static void test_x86_bzhi_index_ge_size(void)
@@ -2682,6 +2717,7 @@ TEST_LIST = {
     {"test_x86_avx_golden", test_x86_avx_golden},
     {"test_x86_avx_vzeroupper_vzeroall", test_x86_avx_vzeroupper_vzeroall},
     {"test_x86_avx_vinsertf128_repro", test_x86_avx_vinsertf128_repro},
+    {"test_x86_avx_vldmxcsr_vstmxcsr", test_x86_avx_vldmxcsr_vstmxcsr},
     {"test_x86_bzhi_index_ge_size", test_x86_bzhi_index_ge_size},
     {"test_x86_vex_invalid_forms_no_abort", test_x86_vex_invalid_forms_no_abort},
     {"test_x86_avx_scalar_vexl_ignored", test_x86_avx_scalar_vexl_ignored},

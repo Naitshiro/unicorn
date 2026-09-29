@@ -1137,6 +1137,18 @@ static void gen_INSERTQ_r(DisasContext *s, CPUX86State *env, X86DecodedInsn *dec
     gen_helper_insertq_r(tcg_ctx, tcg_ctx->cpu_env, OP_PTR0, OP_PTR2);
 }
 
+static void gen_LDMXCSR(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
+{
+    TCGContext *tcg_ctx = s->uc->tcg_ctx;
+
+    if (s->vex_l) {
+        gen_illegal_opcode(s);
+        return;
+    }
+    tcg_gen_trunc_tl_i32(tcg_ctx, s->tmp2_i32, s->T1);
+    gen_helper_ldmxcsr(tcg_ctx, tcg_ctx->cpu_env, s->tmp2_i32);
+}
+
 static void gen_MASKMOV(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
 {
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
@@ -1759,6 +1771,18 @@ static void gen_VAESKEYGEN(DisasContext *s, CPUX86State *env, X86DecodedInsn *de
     TCGv_i32 imm = tcg_constant8u_i32(tcg_ctx, decode->immediate);
     assert(!s->vex_l);
     gen_helper_aeskeygenassist_xmm(tcg_ctx, tcg_ctx->cpu_env, OP_PTR0, OP_PTR1, imm);
+}
+
+static void gen_STMXCSR(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
+{
+    TCGContext *tcg_ctx = s->uc->tcg_ctx;
+
+    if (s->vex_l) {
+        gen_illegal_opcode(s);
+        return;
+    }
+    /* Unicorn: no helper_update_mxcsr in this QEMU; same as legacy STMXCSR. */
+    tcg_gen_ld32u_tl(tcg_ctx, s->T0, tcg_ctx->cpu_env, offsetof(CPUX86State, mxcsr));
 }
 
 static void gen_VAESIMC(DisasContext *s, CPUX86State *env, X86DecodedInsn *decode)
