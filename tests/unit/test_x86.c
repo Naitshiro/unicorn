@@ -2340,12 +2340,12 @@ static void test_x86_vex_new_decoder_hook_size(void)
     OK(uc_close(uc));
 }
 
-// FMA is not implemented until Phase 5: it must fault, not execute as something else.
+// AVX-VNNI is not implemented: it must fault, not execute as something else.
 static void test_x86_vex_unimplemented_is_invalid(void)
 {
     uc_engine *uc;
     uc_hook hk;
-    char code[] = "\xc4\xe2\x71\xb8\xc2"; // vfmadd231ps xmm0, xmm1, xmm2
+    char code[] = "\xc4\xe2\x71\x50\xc2"; // {vex} vpdpbusd xmm0, xmm1, xmm2 (AVX-VNNI)
     VexHookLog log = {{0}, {0}, 0};
     uint64_t x0[2] = {0x4444, 0}, x1[2] = {0x1111, 0}, x2[2] = {0x2222, 0}, out[2];
 
@@ -2426,7 +2426,7 @@ static void test_x86_bmi_new_decoder_semantics(void)
     OK(uc_close(uc));
 }
 
-// CPUID must advertise AVX/AVX2 (and OSXSAVE) now that VEX decode backs them; FMA/F16C wait for Phase 5.
+// CPUID must advertise AVX/AVX2/FMA (and OSXSAVE) now that VEX decode backs them; F16C comes next.
 static void test_x86_avx_cpuid_xcr0(void)
 {
     uc_engine *uc;
@@ -2450,7 +2450,7 @@ static void test_x86_avx_cpuid_xcr0(void)
 
     TEST_CHECK((r8 >> 28) & 1);    // CPUID.1:ECX.AVX
     TEST_CHECK((r8 >> 27) & 1);    // CPUID.1:ECX.OSXSAVE
-    TEST_CHECK(!((r8 >> 12) & 1)); // CPUID.1:ECX.FMA (Phase 5)
+    TEST_CHECK((r8 >> 12) & 1);    // CPUID.1:ECX.FMA
     TEST_CHECK(!((r8 >> 29) & 1)); // CPUID.1:ECX.F16C (Phase 5)
     TEST_CHECK((r9 >> 5) & 1);     // CPUID.(7,0):EBX.AVX2
     TEST_MSG("cpuid.1.ecx=%08" PRIx64 " cpuid.7.ebx=%08" PRIx64, r8, r9);
@@ -2811,6 +2811,66 @@ static void test_x86_legacy_sse_new_decoder(void)
     test_x86_legacy_sse_new_decoder_run("\x0f\x3a\x0e\xc1\x00", 5, true, UC_ERR_INSN_INVALID, NULL); // no MMX pblendw
 }
 
+// FMA3 packed/scalar/addsub forms, register and memory operands, a VEX.L=1 scalar (LIG). Lane 0 of ymm0/ymm3/ymm13 is fused:
+// a separate multiply and add gives 0 there, a single rounding gives 2^-46 / 2^-104. Values from an i7-14700.
+static void test_x86_fma(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe2\x71\xb8\xc2"  // vfmadd231ps xmm0, xmm1, xmm2
+                  "\xc4\xe2\xd9\xa9\xdd"  // vfmadd213sd xmm3, xmm4, xmm5
+                  "\xc4\xc2\x45\xb6\xf0"  // vfmaddsub231ps ymm6, ymm7, ymm8
+                  "\xc4\x42\xa9\x9e\xcb"  // vfnmsub132pd xmm9, xmm10, xmm11
+                  "\xc4\x62\x9d\xa7\x2b"  // vfmsubadd213pd ymm13, ymm12, [rbx]
+                  "\xc4\xe2\x7d\xb9\xfa"; // vfmadd231ss xmm7, xmm0, xmm2 with VEX.L=1 (LIG: clears 255:128)
+    static const uint64_t in[14][4] = {
+        {0x40800000bf800002ULL, 0xf149f2ca3e800000ULL, 0xdeadbeefcafef00dULL, 0x0000000000000001ULL},
+        {0x400000003f800001ULL, 0x7149f2cabfc00000ULL, 0xc00000003eaaaaabULL, 0x33d6bf95477fe000ULL},
+        {0x404000003f800001ULL, 0x501502f940200000ULL, 0x477ff0003eaaaaabULL, 0xbdcccccd358637bdULL},
+        {0x3ff0000000000001ULL, 0x1122334455667788ULL, 0x0000000000000007ULL, 0x0000000000000008ULL},
+        {0x3ff0000000000001ULL, 0, 0, 0},
+        {0xbff0000000000002ULL, 0, 0, 0},
+        {0x400000003f800000ULL, 0x4080000040400000ULL, 0x40c0000040a00000ULL, 0x4100000040e00000ULL},
+        {0xc00000003f800001ULL, 0x404000003f000000ULL, 0xba83126f3a83126fULL, 0xc2c8000042c80000ULL},
+        {0x40a000003f800001ULL, 0x3e000000c0800000ULL, 0x4040000040400000ULL, 0xff8000007fc00001ULL},
+        {0x3fd5555555555555ULL, 0xc004000000000000ULL, 0x0000000000000055ULL, 0x0000000000000000ULL},
+        {0x3fb999999999999aULL, 0x7e37e43c8800759cULL, 0, 0},
+        {0x4008000000000000ULL, 0x4202a05f20000000ULL, 0, 0},
+        {0x3ff0000000000001ULL, 0x4000000000000000ULL, 0xc008000000000000ULL, 0x01a56e1fc2f8f359ULL},
+        {0x3ff0000000000001ULL, 0x3fb999999999999aULL, 0x401c000000000000ULL, 0x01a56e1fc2f8f359ULL},
+    };
+    static const uint64_t mem[4] = {0xbff0000000000002ULL, 0x3ff0000000000000ULL, 0x3fe0000000000000ULL,
+                                    0x000012688b70e62bULL};
+    static const struct {
+        int reg;
+        uint64_t v[4];
+    } expect[] = {
+        {0, {0x4120000028800000ULL, 0x7f800000c0600000ULL, 0, 0}},
+        {3, {0x3970000000000000ULL, 0x1122334455667788ULL, 0, 0}},
+        {6, {0xc100000034800000ULL, 0x408c0000c0a00000ULL, 0x40bfe76dc09fe76dULL, 0x7f8000007fc00001ULL}},
+        {7, {0xc00000003f800001ULL, 0x404000003f000000ULL, 0, 0}},
+        {9, {0xbff1999999999999ULL, 0xfe37e43c8800759cULL, 0, 0}},
+        {13, {0x3970000000000000ULL, 0xbfe999999999999aULL, 0xc034800000000000ULL, 0x800012688b70e62bULL}},
+    };
+    uint64_t rbx = 0x3000, ymm[4];
+    int i;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, rbx, mem, sizeof(mem)));
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    for (i = 0; i < 14; i++) {
+        OK(uc_reg_write(uc, UC_X86_REG_YMM0 + i, in[i]));
+    }
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    for (i = 0; i < (int)(sizeof(expect) / sizeof(expect[0])); i++) {
+        OK(uc_reg_read(uc, UC_X86_REG_YMM0 + expect[i].reg, ymm));
+        TEST_CHECK(memcmp(ymm, expect[i].v, sizeof(ymm)) == 0);
+        TEST_MSG("ymm%d = %016" PRIx64 ":%016" PRIx64 ":%016" PRIx64 ":%016" PRIx64, expect[i].reg, ymm[3],
+                 ymm[2], ymm[1], ymm[0]);
+    }
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
@@ -2894,4 +2954,5 @@ TEST_LIST = {
     {"test_x86_3dnow", test_x86_3dnow},
     {"test_x86_movbe_movnt_forms", test_x86_movbe_movnt_forms},
     {"test_x86_legacy_sse_new_decoder", test_x86_legacy_sse_new_decoder},
+    {"test_x86_fma", test_x86_fma},
     {NULL, NULL}};
