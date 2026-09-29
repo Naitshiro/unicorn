@@ -1432,7 +1432,6 @@ update_mxcsr_status \
 helper_ldmxcsr \
 helper_enter_mmx \
 helper_emms \
-helper_movq \
 helper_psrlw_mmx \
 helper_psraw_mmx \
 helper_psllw_mmx \

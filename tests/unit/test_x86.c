@@ -2719,6 +2719,34 @@ static void test_x86_avx_scalar_vexl_ignored(void)
     OK(uc_close(uc));
 }
 
+// 3DNow! on the new decoder (upstream 71a0891d); REX.R/REX.B never extend MMX registers (416f2b16c0).
+static void test_x86_3dnow(void)
+{
+    uc_engine *uc;
+    char code[] = "\x0f\x0f\xc1\x0d"     // pi2fd mm0, mm1
+                  "\x45\x0f\x0f\xc2\x9e" // pfadd mm0, mm2 (REX.RB must be ignored)
+                  "\x0f\x0e";            // femms
+    uint8_t st[10] = {0};
+    uint64_t mm1 = 0x0000000300000002ULL; // int32 {2, 3}
+    uint64_t mm2 = 0x3f8000003f800000ULL; // float {1.0, 1.0}
+    uint64_t mm0;
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_64, &uc));
+    OK(uc_ctl_set_cpu_model(uc, UC_CPU_X86_PHENOM));
+    OK(uc_mem_map(uc, code_start, code_len, UC_PROT_ALL));
+    OK(uc_mem_write(uc, code_start, code, sizeof(code) - 1));
+    memcpy(st, &mm1, 8);
+    OK(uc_reg_write(uc, UC_X86_REG_ST1, st));
+    memcpy(st, &mm2, 8);
+    OK(uc_reg_write(uc, UC_X86_REG_ST2, st));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_ST0, st));
+    memcpy(&mm0, st, 8);
+    TEST_CHECK(mm0 == 0x4080000040400000ULL); // float {3.0, 4.0}
+    TEST_MSG("mm0=%016" PRIx64, mm0);
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
@@ -2799,4 +2827,5 @@ TEST_LIST = {
     {"test_x86_hook_block", test_x86_hook_block},
     {"test_x86_mem_hooks_pc_guarantee", test_x86_mem_hooks_pc_guarantee},
     {"test_x86_xrstor_sse_keeps_ymmh", test_x86_xrstor_sse_keeps_ymmh},
+    {"test_x86_3dnow", test_x86_3dnow},
     {NULL, NULL}};

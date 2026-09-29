@@ -1429,7 +1429,6 @@
 #define helper_ldmxcsr helper_ldmxcsr_x86_64
 #define helper_enter_mmx helper_enter_mmx_x86_64
 #define helper_emms helper_emms_x86_64
-#define helper_movq helper_movq_x86_64
 #define helper_psrlw_mmx helper_psrlw_mmx_x86_64
 #define helper_psraw_mmx helper_psraw_mmx_x86_64
 #define helper_psllw_mmx helper_psllw_mmx_x86_64
