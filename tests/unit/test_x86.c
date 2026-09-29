@@ -2952,6 +2952,416 @@ static void test_x86_mxcsr_ftz(void)
     }
 }
 
+static void ymm_pattern(uint64_t v[4], int i)
+{
+    v[0] = 0x1010101010101010ULL * (uint64_t)(i + 1);
+    v[1] = 0x0101010101010101ULL * (uint64_t)(i + 1) + 0x100;
+    v[2] = 0xa0a0a0a0a0a0a0a0ULL ^ (uint64_t)i;
+    v[3] = 0x0505050505050505ULL ^ ((uint64_t)i << 32);
+}
+
+static void test_x86_xsave_ymm_roundtrip(void)
+{
+    uc_engine *uc;
+    char code[] = "\x31\xc9"             // xor ecx, ecx
+                  "\x0f\x01\xd0"         // xgetbv
+                  "\x49\x89\xc0"         // mov r8, rax
+                  "\x49\x89\xd1"         // mov r9, rdx
+                  "\xb9\x00\x30\x00\x00" // mov ecx, 0x3000
+                  "\xb8\x07\x00\x00\x00" // mov eax, 7
+                  "\x31\xd2"             // xor edx, edx
+                  "\x0f\xae\x21"         // xsave [rcx]
+                  "\xc5\xfc\x77"         // vzeroall
+                  "\x0f\xae\xb1\x00\x04\x00\x00" // xsaveopt [rcx+0x400]
+                  "\x0f\xae\x29";        // xrstor [rcx]
+    uint8_t zero[0x800] = {0};
+    uint8_t area[0x340], area2[0x340];
+    uint64_t v[4], out[4], r8, r9, bv;
+    int i;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, 0x3000, zero, sizeof(zero)));
+    for (i = 0; i < 16; i++) {
+        ymm_pattern(v, i);
+        OK(uc_reg_write(uc, UC_X86_REG_YMM0 + i, v));
+    }
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_R8, &r8));
+    OK(uc_reg_read(uc, UC_X86_REG_R9, &r9));
+    TEST_CHECK(r8 == 7 && r9 == 0);
+    OK(uc_mem_read(uc, 0x3000, area, sizeof(area)));
+    OK(uc_mem_read(uc, 0x3400, area2, sizeof(area2)));
+    memcpy(&bv, area + 512, 8);
+    TEST_CHECK((bv & 7) == 7);
+    for (i = 0; i < 16; i++) {
+        ymm_pattern(v, i);
+        OK(uc_reg_read(uc, UC_X86_REG_YMM0 + i, out));
+        TEST_CHECK(memcmp(out, v, 32) == 0);
+        TEST_MSG("ymm%d not restored", i);
+        TEST_CHECK(memcmp(area + 160 + 16 * i, v, 16) == 0);
+        TEST_CHECK(memcmp(area + 576 + 16 * i, v + 2, 16) == 0);
+        TEST_MSG("xsave image of ymm%d wrong", i);
+        memset(out, 0, sizeof(out));
+        TEST_CHECK(memcmp(area2 + 160 + 16 * i, out, 16) == 0);
+        TEST_CHECK(memcmp(area2 + 576 + 16 * i, out, 16) == 0);
+    }
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_fxsave_legacy_sse_keep_ymmh(void)
+{
+    uc_engine *uc;
+    char code[] = "\x0f\xae\x01"         // fxsave [rcx]
+                  "\x66\x0f\xef\xc9"     // pxor xmm1, xmm1 (legacy: upper kept)
+                  "\xc5\xe9\xef\xd2"     // vpxor xmm2, xmm2, xmm2 (VEX.128: upper zeroed)
+                  "\x0f\xae\x09";        // fxrstor [rcx]
+    uint8_t zero[0x200] = {0};
+    uint64_t v[4], out[4], rcx = 0x3000;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, rcx, zero, sizeof(zero)));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    ymm_pattern(v, 1);
+    OK(uc_reg_write(uc, UC_X86_REG_YMM1, v));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM2, v));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_YMM1, out));
+    TEST_CHECK(memcmp(out, v, 32) == 0);
+    OK(uc_reg_read(uc, UC_X86_REG_YMM2, out));
+    TEST_CHECK(memcmp(out, v, 16) == 0 && out[2] == 0 && out[3] == 0);
+
+    OK(uc_close(uc));
+}
+
+typedef struct {
+    int n;
+    uint64_t addr[8];
+    uint64_t ymm0_hi[8];
+    int step;
+} VzHookState;
+
+static void test_x86_vzeroupper_hook_cb(uc_engine *uc, uint64_t address,
+                                        uint32_t size, void *user_data)
+{
+    VzHookState *s = user_data;
+    uint64_t y[4];
+
+    OK(uc_reg_read(uc, UC_X86_REG_YMM0, y));
+    if (s->n < 8) {
+        s->addr[s->n] = address;
+        s->ymm0_hi[s->n] = y[2] | y[3];
+        s->n++;
+    }
+    if (address == code_start + 4) {
+        // at vzeroupper: poke ymm1 upper, must still be cleared
+        uint64_t v[4];
+        ymm_pattern(v, 1);
+        OK(uc_reg_write(uc, UC_X86_REG_YMM1, v));
+    }
+    if (address == code_start + 7) {
+        // at the ymm3 store: hook-written value must be what is stored
+        uint64_t v[4];
+        ymm_pattern(v, 3);
+        OK(uc_reg_write(uc, UC_X86_REG_YMM3, v));
+    }
+}
+
+static void test_x86_vzeroupper_hook_code(void)
+{
+    uc_engine *uc;
+    uc_hook h;
+    char code[] = "\xc5\xfe\x6f\x01"     // vmovdqu ymm0, [rcx]
+                  "\xc5\xf8\x77"         // vzeroupper
+                  "\xc5\xfe\x7f\x59\x20" // vmovdqu [rcx+0x20], ymm3
+                  "\xc5\xfe\x7f\x49\x40" // vmovdqu [rcx+0x40], ymm1
+                  "\xc5\xfe\x7f\x41\x60"; // vmovdqu [rcx+0x60], ymm0
+    uint64_t v[4], out[4], mem[12], rcx = 0x3000;
+    VzHookState s = {0};
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        memset(&s, 0, sizeof(s));
+        uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+        ymm_pattern(v, 0);
+        OK(uc_mem_write(uc, rcx, v, 32));
+        OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+        OK(uc_hook_add(uc, &h, UC_HOOK_CODE, test_x86_vzeroupper_hook_cb, &s,
+                       1, 0));
+        if (pass == 0) {
+            OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0,
+                            0));
+        } else {
+            // one instruction per uc_emu_start: every TB is split
+            uint64_t rip = code_start;
+            while (rip < code_start + sizeof(code) - 1) {
+                OK(uc_emu_start(uc, rip, code_start + sizeof(code) - 1, 0, 1));
+                OK(uc_reg_read(uc, UC_X86_REG_RIP, &rip));
+            }
+        }
+        TEST_CHECK(s.n == 5);
+        TEST_CHECK(s.addr[1] == code_start + 4 && s.ymm0_hi[1] != 0);
+        TEST_CHECK(s.addr[2] == code_start + 7 && s.ymm0_hi[2] == 0);
+        OK(uc_mem_read(uc, rcx + 0x20, mem, sizeof(mem)));
+        ymm_pattern(v, 3);
+        TEST_CHECK(memcmp(mem, v, 32) == 0);
+        TEST_MSG("pass %d: hook write to ymm3 not seen by the store", pass);
+        ymm_pattern(v, 1);
+        TEST_CHECK(memcmp(mem + 4, v, 16) == 0 && mem[6] == 0 && mem[7] == 0);
+        TEST_MSG("pass %d: vzeroupper did not clear hook-written ymm1", pass);
+        ymm_pattern(v, 0);
+        TEST_CHECK(memcmp(mem + 8, v, 16) == 0 && mem[10] == 0 && mem[11] == 0);
+        OK(uc_reg_read(uc, UC_X86_REG_YMM0, out));
+        TEST_CHECK(out[2] == 0 && out[3] == 0);
+        OK(uc_close(uc));
+    }
+}
+
+typedef struct {
+    int n;
+    int type[16];
+    uint64_t addr[16];
+    int size[16];
+} MemHookLog;
+
+static void test_x86_avx_mem_hook_cb(uc_engine *uc, uc_mem_type type,
+                                     uint64_t address, int size, int64_t value,
+                                     void *user_data)
+{
+    MemHookLog *l = user_data;
+
+    if (l->n < 16) {
+        l->type[l->n] = type;
+        l->addr[l->n] = address;
+        l->size[l->n] = size;
+    }
+    l->n++;
+}
+
+// Every logged access must be of the given type and cover [base, base+len) contiguously.
+static int mem_log_covers(MemHookLog *l, int from, int to, int type,
+                          uint64_t base, int len)
+{
+    uint64_t next = base;
+    int i;
+
+    for (i = from; i < to; i++) {
+        if (l->type[i] != type || l->addr[i] != next) {
+            return 0;
+        }
+        next += l->size[i];
+    }
+    return next == base + len;
+}
+
+static void test_x86_avx_mem_hooks(void)
+{
+    uc_engine *uc;
+    uc_hook h;
+    char code[] = "\xc5\xfe\x6f\x01"                 // vmovdqu ymm0, [rcx]
+                  "\xc5\xfe\x7f\x41\x40"             // vmovdqu [rcx+0x40], ymm0
+                  "\xc5\xfc\x10\x49\x01"             // vmovups ymm1, [rcx+1]
+                  "\xc5\xfd\xe7\x81\x80\x00\x00\x00" // vmovntdq [rcx+0x80], ymm0
+                  "\xc4\xe2\x6d\x90\x04\x89";        // vpgatherdd ymm0, [rcx+ymm1*4], ymm2
+    uint64_t rcx = 0x3000, out[4];
+    uint32_t idx[8] = {7, 0, 3, 1, 6, 2, 5, 4};
+    uint64_t ones[4] = {~0ULL, ~0ULL, ~0ULL, ~0ULL};
+    uint8_t data[0x100];
+    MemHookLog l = {0};
+    int a, b, c, d, i;
+
+    for (i = 0; i < (int)sizeof(data); i++) {
+        data[i] = (uint8_t)i;
+    }
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, rcx, data, sizeof(data)));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_hook_add(uc, &h, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                   test_x86_avx_mem_hook_cb, &l, 1, 0));
+    // stop before the gather; its index vector (ymm1) is loaded below
+    OK(uc_emu_start(uc, code_start, code_start + 22, 0, 0));
+    for (a = 0; a < l.n && l.addr[a] < rcx + 0x20 && l.type[a] == UC_MEM_READ; a++) {
+    }
+    TEST_CHECK(mem_log_covers(&l, 0, a, UC_MEM_READ, rcx, 32));
+    for (b = a; b < l.n && l.type[b] == UC_MEM_WRITE; b++) {
+    }
+    TEST_CHECK(mem_log_covers(&l, a, b, UC_MEM_WRITE, rcx + 0x40, 32));
+    for (c = b; c < l.n && l.type[c] == UC_MEM_READ; c++) {
+    }
+    TEST_CHECK(mem_log_covers(&l, b, c, UC_MEM_READ, rcx + 1, 32));
+    d = l.n;
+    TEST_CHECK(mem_log_covers(&l, c, d, UC_MEM_WRITE, rcx + 0x80, 32));
+    TEST_MSG("log: n=%d a=%d b=%d c=%d", l.n, a, b, c);
+
+    memset(&l, 0, sizeof(l));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM1, idx));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM2, ones));
+    OK(uc_emu_start(uc, code_start + 22, code_start + sizeof(code) - 1, 0, 0));
+    TEST_CHECK(l.n == 8);
+    for (i = 0; i < 8 && i < l.n; i++) {
+        TEST_CHECK(l.type[i] == UC_MEM_READ && l.size[i] == 4 &&
+                   l.addr[i] == rcx + 4 * idx[i]);
+    }
+    OK(uc_reg_read(uc, UC_X86_REG_YMM2, out));
+    TEST_CHECK(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+    OK(uc_reg_read(uc, UC_X86_REG_YMM0, out));
+    TEST_CHECK(out[0] == 0x030201001f1e1d1cULL);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_avx_page_cross(void)
+{
+    uc_engine *uc;
+    char load[] = "\xc5\xfe\x6f\x01";  // vmovdqu ymm0, [rcx]
+    char store[] = "\xc5\xfe\x7f\x09"; // vmovdqu [rcx], ymm1
+    uint64_t v[4], out[4], rcx = 0x10ff0, rip;
+    uint8_t data[32], ff[16];
+    int i;
+
+    for (i = 0; i < 32; i++) {
+        data[i] = (uint8_t)(0x80 + i);
+    }
+    memset(ff, 0xff, sizeof(ff));
+
+    // both pages mapped: split access returns the right bytes
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, load, sizeof(load) - 1);
+    OK(uc_mem_map(uc, 0x10000, 0x2000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, rcx, data, 32));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(load) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_YMM0, out));
+    TEST_CHECK(memcmp(out, data, 32) == 0);
+    OK(uc_close(uc));
+
+    // second page unmapped: load faults, rip and ymm0 unchanged
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, load, sizeof(load) - 1);
+    OK(uc_mem_map(uc, 0x10000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, rcx, data, 16));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    ymm_pattern(v, 5);
+    OK(uc_reg_write(uc, UC_X86_REG_YMM0, v));
+    uc_assert_err(UC_ERR_READ_UNMAPPED,
+                  uc_emu_start(uc, code_start, code_start + sizeof(load) - 1,
+                               0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RIP, &rip));
+    TEST_CHECK(rip == code_start);
+    OK(uc_reg_read(uc, UC_X86_REG_YMM0, out));
+    TEST_CHECK(memcmp(out, v, 32) == 0);
+    OK(uc_close(uc));
+
+    // second page unmapped: store faults at the instruction. Like upstream QEMU,
+    // the qwords before the page boundary are already written (not checked).
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, store, sizeof(store) - 1);
+    OK(uc_mem_map(uc, 0x10000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, rcx, ff, 16));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_write(uc, UC_X86_REG_YMM1, data));
+    uc_assert_err(UC_ERR_WRITE_UNMAPPED,
+                  uc_emu_start(uc, code_start, code_start + sizeof(store) - 1,
+                               0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RIP, &rip));
+    TEST_CHECK(rip == code_start);
+    OK(uc_close(uc));
+}
+
+static void test_x86_avx_align_intr_cb(uc_engine *uc, uint32_t intno,
+                                       void *user_data)
+{
+    *(int *)user_data = (int)intno;
+    uc_emu_stop(uc);
+}
+
+static void test_x86_avx_state_api(void)
+{
+    uc_engine *uc;
+    uc_context *ctx;
+    char code1[] = "\xc5\xfe\x6f\x01"; // vmovdqu ymm0, [rcx]
+    char code2[] = "\xc5\xfe\x7f\x41\x20" // vmovdqu [rcx+0x20], ymm0
+                   "\xc5\xfc\x77";        // vzeroall
+    uint64_t v[4], out[4], rcx = 0x3000;
+    int i;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code1, sizeof(code1) - 1);
+    OK(uc_mem_write(uc, code_start + 0x100, code2, sizeof(code2) - 1));
+    ymm_pattern(v, 9);
+    OK(uc_mem_write(uc, rcx, v, 32));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    // upper halves must survive between separate uc_emu_start calls
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code1) - 1, 0, 0));
+    for (i = 1; i < 16; i++) {
+        ymm_pattern(v, i);
+        OK(uc_reg_write(uc, UC_X86_REG_YMM0 + i, v));
+    }
+    OK(uc_context_alloc(uc, &ctx));
+    OK(uc_context_save(uc, ctx));
+    OK(uc_emu_start(uc, code_start + 0x100,
+                    code_start + 0x100 + sizeof(code2) - 1, 0, 0));
+    OK(uc_mem_read(uc, rcx + 0x20, out, 32));
+    ymm_pattern(v, 9);
+    TEST_CHECK(memcmp(out, v, 32) == 0);
+    OK(uc_reg_read(uc, UC_X86_REG_YMM5, out));
+    TEST_CHECK(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+    OK(uc_context_restore(uc, ctx));
+    for (i = 0; i < 16; i++) {
+        ymm_pattern(v, i == 0 ? 9 : i);
+        OK(uc_reg_read(uc, UC_X86_REG_YMM0 + i, out));
+        TEST_CHECK(memcmp(out, v, 32) == 0);
+        TEST_MSG("ymm%d not restored by uc_context_restore", i);
+        memset(out, 0, sizeof(out));
+        OK(uc_context_reg_read(ctx, UC_X86_REG_YMM0 + i, out));
+        TEST_CHECK(memcmp(out, v, 32) == 0);
+    }
+    OK(uc_context_free(ctx));
+    OK(uc_close(uc));
+}
+
+static void test_x86_avx_xcr0_cr4(void)
+{
+    uc_engine *uc;
+    uc_hook h;
+    char code[] = "\x31\xc9"             // xor ecx, ecx
+                  "\xb8\x03\x00\x00\x00" // mov eax, 3 (x87|SSE, no AVX)
+                  "\x31\xd2"             // xor edx, edx
+                  "\x0f\x01\xd1"         // xsetbv
+                  "\xc5\xfc\x77";        // vzeroall -> #UD
+    char code32[] = "\xc5\xfe\x7f\x01";  // vmovdqu [ecx], ymm0 (32-bit mode)
+    uint64_t cr4, v[4], out[4];
+    uint32_t ecx = 0x3000;
+    int intno = -1;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_hook_add(uc, &h, UC_HOOK_INTR, test_x86_avx_align_intr_cb, &intno,
+                   1, 0));
+    uc_assert_err(UC_ERR_INSN_INVALID,
+                  uc_emu_start(uc, code_start, code_start + sizeof(code) - 1,
+                               0, 0));
+    OK(uc_close(uc));
+
+    // clearing CR4.OSXSAVE through the API must disable VEX
+    intno = -1;
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code + 12, 3);
+    OK(uc_hook_add(uc, &h, UC_HOOK_INTR, test_x86_avx_align_intr_cb, &intno,
+                   1, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_CR4, &cr4));
+    TEST_CHECK(cr4 & (1ULL << 18));
+    cr4 &= ~(1ULL << 18);
+    OK(uc_reg_write(uc, UC_X86_REG_CR4, &cr4));
+    uc_assert_err(UC_ERR_INSN_INVALID,
+                  uc_emu_start(uc, code_start, code_start + 3, 0, 0));
+    OK(uc_close(uc));
+
+    // 32-bit mode: YMM register API and a 256-bit store
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_32, code32, sizeof(code32) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_ECX, &ecx));
+    ymm_pattern(v, 4);
+    OK(uc_reg_write(uc, UC_X86_REG_YMM0, v));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code32) - 1, 0, 0));
+    OK(uc_mem_read(uc, ecx, out, 32));
+    TEST_CHECK(memcmp(out, v, 32) == 0);
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
@@ -3038,4 +3448,11 @@ TEST_LIST = {
     {"test_x86_fma", test_x86_fma},
     {"test_x86_f16c", test_x86_f16c},
     {"test_x86_mxcsr_ftz", test_x86_mxcsr_ftz},
+    {"test_x86_xsave_ymm_roundtrip", test_x86_xsave_ymm_roundtrip},
+    {"test_x86_fxsave_legacy_sse_keep_ymmh", test_x86_fxsave_legacy_sse_keep_ymmh},
+    {"test_x86_vzeroupper_hook_code", test_x86_vzeroupper_hook_code},
+    {"test_x86_avx_mem_hooks", test_x86_avx_mem_hooks},
+    {"test_x86_avx_page_cross", test_x86_avx_page_cross},
+    {"test_x86_avx_state_api", test_x86_avx_state_api},
+    {"test_x86_avx_xcr0_cr4", test_x86_avx_xcr0_cr4},
     {NULL, NULL}};
