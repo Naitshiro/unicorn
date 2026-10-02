@@ -1704,6 +1704,8 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
         case UC_X86_REG_SS:
             CHECK_REG_TYPE(uint16_t);
             env->segs[R_SS].selector = *(uint16_t *)value;
+            // Long mode loads no descriptor here, so the selector's RPL is the only way to put a guest in ring 3 (HLT, CLI, IN and friends then raise #GP)
+            env->hflags = (env->hflags & ~HF_CPL_MASK) | (*(uint16_t *)value & 3);
             break;
         case UC_X86_REG_ES:
             CHECK_REG_TYPE(uint16_t);

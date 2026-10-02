@@ -423,6 +423,10 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
             return true;
         }
 
+#if defined(TARGET_X86_64)
+        // The hooks consumed the exception without a real delivery, so it must not turn the next contributory fault into a double fault
+        ((CPUX86State *)cpu->env_ptr)->old_exception = -1;
+#endif
         cpu->exception_index = -1;
     }
 
