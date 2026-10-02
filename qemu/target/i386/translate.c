@@ -763,9 +763,6 @@ static void gen_helper_out_func(TCGContext *tcg_ctx, MemOp ot, TCGv_i32 v, TCGv_
 static void gen_check_io(DisasContext *s, MemOp ot, target_ulong cur_eip,
                          uint32_t svm_flags)
 {
-    // Unicorn: allow all I/O instructions
-    return;
-
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
     target_ulong next_eip;
 
