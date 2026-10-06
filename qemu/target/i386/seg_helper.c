@@ -1452,7 +1452,8 @@ int uc_check_cpu_x86_load_seg(CPUX86State *env, int seg_reg, int sel)
                 if ((e2 & DESC_CS_MASK) || !(e2 & DESC_W_MASK)) {
                     return UC_ERR_EXCEPTION;
                 }
-                if (rpl != cpl || dpl != cpl) {
+                /* A host register write may change privilege level: the selector RPL must match the descriptor DPL, and loading it sets the CPL */
+                if (rpl != dpl) {
                     return UC_ERR_EXCEPTION;
                 }
             } else {

@@ -1413,7 +1413,24 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
             if (ret) {
                 return ret;
             }
-            cpu_x86_load_seg(env, R_SS, *(uint16_t *)value);
+            if ((env->cr[0] & CR0_PE_MASK) && !(env->eflags & VM_MASK) && (*(uint16_t *)value & 0xfffc) != 0) {
+                // A host write may change the privilege level: load the descriptor without the guest-instruction RPL/CPL rules, which sets the CPL from its DPL
+                SegmentCache *dt = (*(uint16_t *)value & 4) ? &env->ldt : &env->gdt;
+                target_ulong ptr = dt->base + (*(uint16_t *)value & ~7);
+                uint32_t e1 = 0;
+                uint32_t e2 = 0;
+                uc_mem_read(env->uc, ptr, &e1, 4);
+                uc_mem_read(env->uc, ptr + 4, &e2, 4);
+                uint32_t base = (e2 & 0xff000000) | ((e2 & 0xff) << 16) | ((e1 >> 16) & 0xffff);
+                uint32_t limit = (e1 & 0xffff) | (e2 & 0xf0000);
+                if (e2 & DESC_G_MASK) {
+                    limit = (limit << 12) | 0xfff;
+                }
+                e2 |= DESC_A_MASK;
+                cpu_x86_load_seg_cache(env, R_SS, *(uint16_t *)value, base, limit, e2);
+            } else {
+                cpu_x86_load_seg(env, R_SS, *(uint16_t *)value);
+            }
             break;
         case UC_X86_REG_ES:
             CHECK_REG_TYPE(uint16_t);
