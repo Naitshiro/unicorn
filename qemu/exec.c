@@ -955,14 +955,18 @@ void flatview_add_to_dispatch(struct uc_struct *uc, FlatView *fv, MemoryRegionSe
     register_subpage(uc, fv, &remain);
 }
 
-static ram_addr_t find_ram_offset_last(struct uc_struct *uc, ram_addr_t size)
+static ram_addr_t find_ram_offset_high_water(struct uc_struct *uc,
+                                             ram_addr_t size)
 {
+    RAMBlock *block;
     ram_addr_t result = 0;
-    RAMBlock *block = uc->ram_list.last_block;
 
-    result = block->offset + block->max_length;
+    /* The list is size-sorted, so scan offsets to find a safe high-water mark. */
+    RAMBLOCK_FOREACH(block) {
+        result = MAX(result, block->offset + block->max_length);
+    }
 
-    if (result + size > RAM_ADDR_MAX) {
+    if (size > RAM_ADDR_MAX - result) {
         abort();
     }
     return result;
@@ -974,54 +978,9 @@ static ram_addr_t find_ram_offset_last(struct uc_struct *uc, ram_addr_t size)
  */
 static ram_addr_t find_ram_offset(struct uc_struct *uc, ram_addr_t size)
 {
-    RAMBlock *block, *next_block;
-    ram_addr_t offset = RAM_ADDR_MAX, mingap = RAM_ADDR_MAX;
-
     assert(size != 0); /* it would hand out same offset multiple times */
-
-    if (QLIST_EMPTY_RCU(&uc->ram_list.blocks)) {
-        return 0;
-    }
-
-    if (!uc->ram_list.freed) {
-        return find_ram_offset_last(uc, size);
-    }
-
-    RAMBLOCK_FOREACH(block) {
-        ram_addr_t candidate, next = RAM_ADDR_MAX;
-
-        /* Align blocks to start on a 'long' in the bitmap
-         * which makes the bitmap sync'ing take the fast path.
-         */
-        candidate = block->offset + block->max_length;
-        candidate = ROUND_UP(candidate, BITS_PER_LONG << TARGET_PAGE_BITS);
-
-        /* Search for the closest following block
-         * and find the gap.
-         */
-        RAMBLOCK_FOREACH(next_block) {
-            if (next_block->offset >= candidate) {
-                next = MIN(next, next_block->offset);
-            }
-        }
-
-        /* If it fits remember our place and remember the size
-         * of gap, but keep going so that we might find a smaller
-         * gap to fill so avoiding fragmentation.
-         */
-        if (next - candidate >= size && next - candidate < mingap) {
-            offset = candidate;
-            mingap = next - candidate;
-        }
-    }
-
-    if (offset == RAM_ADDR_MAX) {
-        fprintf(stderr, "Failed to find gap of requested size: %" PRIu64 "\n",
-                (uint64_t)size);
-        abort();
-    }
-
-    return offset;
+    /* The old gap search also assumed existing intervals were disjoint. */
+    return find_ram_offset_high_water(uc, size);
 }
 
 void *qemu_ram_get_host_addr(RAMBlock *rb)
@@ -1053,6 +1012,7 @@ static void ram_block_add(struct uc_struct *uc, RAMBlock *new_block)
 {
     RAMBlock *block;
     RAMBlock *last_block = NULL;
+    const char *check_overlap = getenv("TORITO_UC_CHECK_RAM_OVERLAP");
 
     new_block->offset = find_ram_offset(uc, new_block->max_length);
 
@@ -1103,6 +1063,27 @@ static void ram_block_add(struct uc_struct *uc, RAMBlock *new_block)
     cpu_physical_memory_set_dirty_range(new_block->offset,
                                         new_block->used_length,
                                         DIRTY_CLIENTS_ALL);
+
+    /* UNVERIFIED: the opt-in diagnostic has only been exercised on the host test lane. */
+    if (check_overlap && !strcmp(check_overlap, "1")) {
+        RAMBLOCK_FOREACH(block) {
+            ram_addr_t new_end, block_end;
+
+            if (block == new_block) {
+                continue;
+            }
+            new_end = new_block->offset + new_block->max_length;
+            block_end = block->offset + block->max_length;
+            if (new_block->offset < block_end && block->offset < new_end) {
+                fprintf(stderr,
+                        "RAM offset overlap: [%" PRIx64 ",%" PRIx64
+                        ") overlaps [%" PRIx64 ",%" PRIx64 ")\n",
+                        (uint64_t)new_block->offset, (uint64_t)new_end,
+                        (uint64_t)block->offset, (uint64_t)block_end);
+                abort();
+            }
+        }
+    }
 
 }
 
