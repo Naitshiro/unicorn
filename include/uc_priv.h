@@ -272,6 +272,8 @@ typedef struct TCGContext TCGContext;
 struct uc_struct {
     uc_arch arch;
     uc_mode mode;
+    uint64_t rdrand_seed;
+    bool rdrand_seeded;
     uc_err errnum; // qemu/cpu-exec.c
     AddressSpace address_space_memory;
     AddressSpace address_space_io;

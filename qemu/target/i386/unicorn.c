@@ -2088,6 +2088,31 @@ static int x86_cpus_init(struct uc_struct *uc, const char *cpu_model)
     return 0;
 }
 
+uc_err uc_x86_get_rdrand_state(struct uc_struct *uc, uint64_t *state,
+                               bool *initialized)
+{
+    if (uc == NULL || uc->arch != UC_ARCH_X86 || uc->cpu == NULL ||
+        state == NULL || initialized == NULL) {
+        return UC_ERR_ARG;
+    }
+    CPUX86State *env = uc->cpu->env_ptr;
+    *state = env->rdrand_state;
+    *initialized = env->rdrand_state_initialized;
+    return UC_ERR_OK;
+}
+
+uc_err uc_x86_set_rdrand_state(struct uc_struct *uc, uint64_t state,
+                               bool initialized)
+{
+    if (uc == NULL || uc->arch != UC_ARCH_X86 || uc->cpu == NULL) {
+        return UC_ERR_ARG;
+    }
+    CPUX86State *env = uc->cpu->env_ptr;
+    env->rdrand_state = state;
+    env->rdrand_state_initialized = initialized;
+    return UC_ERR_OK;
+}
+
 DEFAULT_VISIBILITY
 void uc_init(struct uc_struct *uc)
 {

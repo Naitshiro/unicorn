@@ -2977,6 +2977,33 @@ uc_err uc_ctl(uc_engine *uc, uc_control_type control, ...)
         restore_jit_state(uc);
         break;
 
+    case UC_CTL_RDRAND_SEED: {
+        if (rw != UC_CTL_IO_WRITE) {
+            err = UC_ERR_ARG;
+            break;
+        }
+        uc->rdrand_seed = va_arg(args, uint64_t);
+        uc->rdrand_seeded = true;
+        break;
+    }
+
+    case UC_CTL_RDRAND_STATE: {
+        if (uc->arch != UC_ARCH_X86) {
+            err = UC_ERR_ARG;
+        } else if (rw == UC_CTL_IO_READ) {
+            uint64_t *state = va_arg(args, uint64_t *);
+            bool *initialized = va_arg(args, bool *);
+            err = uc_x86_get_rdrand_state(uc, state, initialized);
+        } else if (rw == UC_CTL_IO_WRITE) {
+            uint64_t state = va_arg(args, uint64_t);
+            int initialized = va_arg(args, int);
+            err = uc_x86_set_rdrand_state(uc, state, initialized != 0);
+        } else {
+            err = UC_ERR_ARG;
+        }
+        break;
+    }
+
     default:
         err = UC_ERR_ARG;
         break;

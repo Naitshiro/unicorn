@@ -1527,6 +1527,10 @@ typedef struct CPUX86State {
 
     uintptr_t retaddr;
 
+    /* Replayed with CPU contexts so deterministic RDRAND/RDSEED state survives snapshots. */
+    uint64_t rdrand_state;
+    bool rdrand_state_initialized;
+
     /* Fields up to this point are cleared by a CPU reset */
     int end_reset_fields;
 

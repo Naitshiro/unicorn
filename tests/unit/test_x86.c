@@ -3418,7 +3418,40 @@ static void test_x86_avx_xcr0_cr4(void)
     OK(uc_close(uc));
 }
 
+static void test_x86_rdrand_context_roundtrip(void)
+{
+    uc_engine *uc;
+    uc_context *context;
+    const uint8_t code[] = {0x48, 0x0f, 0xc7, 0xf0, 0x48, 0x0f, 0xc7, 0xf0};
+    const uint64_t seed = UINT64_C(0x123456789abcdef0);
+    uint64_t saved_state = 0;
+    uint64_t expected = 0;
+    uint64_t actual = 0;
+    bool saved_initialized = false;
+    bool restored_initialized = false;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, (const char *)code,
+                    sizeof(code));
+    OK(uc_ctl_set_rdrand_seed(uc, seed));
+    OK(uc_emu_start(uc, code_start, code_start + 4, 0, 1));
+    OK(uc_ctl_get_rdrand_state(uc, &saved_state, &saved_initialized));
+    TEST_CHECK(saved_initialized);
+    OK(uc_context_alloc(uc, &context));
+    OK(uc_context_save(uc, context));
+    OK(uc_emu_start(uc, code_start + 4, code_start + sizeof(code), 0, 1));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &expected));
+    OK(uc_context_restore(uc, context));
+    OK(uc_ctl_get_rdrand_state(uc, &actual, &restored_initialized));
+    TEST_CHECK(actual == saved_state && restored_initialized == saved_initialized);
+    OK(uc_emu_start(uc, code_start + 4, code_start + sizeof(code), 0, 1));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &actual));
+    TEST_CHECK(actual == expected);
+    OK(uc_context_free(context));
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {
+    {"test_x86_rdrand_context_roundtrip", test_x86_rdrand_context_roundtrip},
     {"test_x86_avx_cpuid_xcr0", test_x86_avx_cpuid_xcr0},
     {"test_x86_avx_golden", test_x86_avx_golden},
     {"test_x86_avx_vzeroupper_vzeroall", test_x86_avx_vzeroupper_vzeroall},
