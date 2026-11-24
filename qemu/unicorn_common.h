@@ -29,6 +29,27 @@ static inline bool cpu_physical_mem_write(AddressSpace *as, hwaddr addr,
     return cpu_physical_memory_rw(as, addr, (void *)buf, len, 1);
 }
 
+/* Writes plain RAM through its host pointer regardless of the readonly flag, without a memory transaction commit; returns false (nothing written) when any byte is not RAM. */
+static inline bool cpu_physical_mem_write_ram_direct(AddressSpace *as, hwaddr addr,
+                                                     const uint8_t *buf, hwaddr len)
+{
+    hwaddr remaining = len;
+    hwaddr cursor = addr;
+
+    while (remaining > 0) {
+        hwaddr l = remaining;
+        hwaddr addr1;
+        MemoryRegion *mr = address_space_translate(as, cursor, &addr1, &l, true,
+                                                  MEMTXATTRS_UNSPECIFIED);
+        if (!memory_region_is_ram(mr) || l == 0) {
+            return false;
+        }
+        cursor += l;
+        remaining -= l;
+    }
+    return address_space_write_rom(as, addr, MEMTXATTRS_UNSPECIFIED, buf, len) == MEMTX_OK;
+}
+
 static bool cpu_virtual_mem_read(struct uc_struct *uc, vaddr addr, uint32_t prot, uint8_t *buf, int len)
 {
     MMUAccessType access_type;
@@ -188,6 +209,7 @@ void softfloat_init(void);
 static inline void uc_common_init(struct uc_struct* uc)
 {
     uc->write_mem = cpu_physical_mem_write;
+    uc->write_mem_ram_direct = cpu_physical_mem_write_ram_direct;
     uc->read_mem = cpu_physical_mem_read;
     uc->read_mem_virtual = cpu_virtual_mem_read;
     uc->virtual_to_physical = cpu_virtual_to_physical;

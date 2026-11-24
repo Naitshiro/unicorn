@@ -968,13 +968,24 @@ uc_err uc_mem_write(uc_engine *uc, uint64_t address, const void *_bytes,
         if (mr) {
             uint32_t operms = mr->perms;
             uint64_t align = uc->target_page_align;
+            len = memory_region_len(uc, mr, address, size - count);
+            if (!(operms & UC_PROT_WRITE) && !uc->snapshot_level &&
+                uc->write_mem_ram_direct &&
+                uc->write_mem_ram_direct(&uc->address_space_memory, address,
+                                         bytes, len)) {
+                // write protected RAM written through its host pointer: the
+                // region flags and flat view stay untouched
+                count += len;
+                address += len;
+                bytes += len;
+                continue;
+            }
             if (!(operms & UC_PROT_WRITE)) { // write protected
                 // but this is not the program accessing memory, so temporarily
                 // mark writable
                 uc->readonly_mem(mr, false);
             }
 
-            len = memory_region_len(uc, mr, address, size - count);
             if (uc->snapshot_level && uc->snapshot_level > mr->priority) {
                 mr = uc->memory_cow(uc, mr, address & ~align,
                                     (len + (address & align) + align) & ~align);
