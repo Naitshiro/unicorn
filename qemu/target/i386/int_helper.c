@@ -23,6 +23,7 @@
 #include "qemu/host-utils.h"
 #include "exec/helper-proto.h"
 #include "qemu/guest-random.h"
+#include "uc_priv.h"
 
 //#define DEBUG_MULDIV
 
@@ -476,7 +477,16 @@ target_ulong HELPER(rdrand)(CPUX86State *env)
 {
     target_ulong ret;
 
-    if (qemu_guest_getrandom(&ret, sizeof(ret)) < 0) {
+    if (env->uc && env->uc->rdrand_seeded) {
+        if (!env->rdrand_state_initialized) {
+            env->rdrand_state = env->uc->rdrand_seed;
+            env->rdrand_state_initialized = true;
+        }
+        uint64_t value = (env->rdrand_state += UINT64_C(0x9E3779B97F4A7C15));
+        value = (value ^ (value >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+        value = (value ^ (value >> 27)) * UINT64_C(0x94D049BB133111EB);
+        ret = (target_ulong)(value ^ (value >> 31));
+    } else if (qemu_guest_getrandom(&ret, sizeof(ret)) < 0) {
         // qemu_log_mask(LOG_UNIMP, "rdrand: Crypto failure: %s",
         //               error_get_pretty(err));
         // error_free(err);

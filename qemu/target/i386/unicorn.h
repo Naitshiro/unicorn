@@ -12,4 +12,8 @@ uc_err reg_write_x86_64(void *env, int mode, unsigned int regid,
                         const void *value, size_t *size, int *setpc);
 
 void uc_init_x86_64(struct uc_struct *uc);
+uc_err uc_x86_get_rdrand_state(struct uc_struct *uc, uint64_t *state,
+                               bool *initialized);
+uc_err uc_x86_set_rdrand_state(struct uc_struct *uc, uint64_t state,
+                               bool initialized);
 #endif
