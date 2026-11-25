@@ -212,11 +212,12 @@ DEF_HELPER_FLAGS_2(pext, TCG_CALL_NO_RWG_SE, tl, tl, tl)
 DEF_HELPER_2(ldmxcsr, void, env, i32)
 DEF_HELPER_1(enter_mmx, void, env)
 DEF_HELPER_1(emms, void, env)
-DEF_HELPER_3(movq, void, env, ptr, ptr)
 
 #define SHIFT 0
 #include "ops_sse_header.h"
 #define SHIFT 1
+#include "ops_sse_header.h"
+#define SHIFT 2
 #include "ops_sse_header.h"
 
 DEF_HELPER_3(rclb, tl, env, tl, tl)

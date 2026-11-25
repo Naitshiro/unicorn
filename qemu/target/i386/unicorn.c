@@ -1413,7 +1413,24 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
             if (ret) {
                 return ret;
             }
-            cpu_x86_load_seg(env, R_SS, *(uint16_t *)value);
+            if ((env->cr[0] & CR0_PE_MASK) && !(env->eflags & VM_MASK) && (*(uint16_t *)value & 0xfffc) != 0) {
+                // A host write may change the privilege level: load the descriptor without the guest-instruction RPL/CPL rules, which sets the CPL from its DPL
+                SegmentCache *dt = (*(uint16_t *)value & 4) ? &env->ldt : &env->gdt;
+                target_ulong ptr = dt->base + (*(uint16_t *)value & ~7);
+                uint32_t e1 = 0;
+                uint32_t e2 = 0;
+                uc_mem_read(env->uc, ptr, &e1, 4);
+                uc_mem_read(env->uc, ptr + 4, &e2, 4);
+                uint32_t base = (e2 & 0xff000000) | ((e2 & 0xff) << 16) | ((e1 >> 16) & 0xffff);
+                uint32_t limit = (e1 & 0xffff) | (e2 & 0xf0000);
+                if (e2 & DESC_G_MASK) {
+                    limit = (limit << 12) | 0xfff;
+                }
+                e2 |= DESC_A_MASK;
+                cpu_x86_load_seg_cache(env, R_SS, *(uint16_t *)value, base, limit, e2);
+            } else {
+                cpu_x86_load_seg(env, R_SS, *(uint16_t *)value);
+            }
             break;
         case UC_X86_REG_ES:
             CHECK_REG_TYPE(uint16_t);
@@ -1704,6 +1721,8 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
         case UC_X86_REG_SS:
             CHECK_REG_TYPE(uint16_t);
             env->segs[R_SS].selector = *(uint16_t *)value;
+            // Long mode loads no descriptor here, so the selector's RPL is the only way to put a guest in ring 3 (HLT, CLI, IN and friends then raise #GP)
+            env->hflags = (env->hflags & ~HF_CPL_MASK) | (*(uint16_t *)value & 3);
             break;
         case UC_X86_REG_ES:
             CHECK_REG_TYPE(uint16_t);
@@ -2067,6 +2086,31 @@ static int x86_cpus_init(struct uc_struct *uc, const char *cpu_model)
     }
 
     return 0;
+}
+
+uc_err uc_x86_get_rdrand_state(struct uc_struct *uc, uint64_t *state,
+                               bool *initialized)
+{
+    if (uc == NULL || uc->arch != UC_ARCH_X86 || uc->cpu == NULL ||
+        state == NULL || initialized == NULL) {
+        return UC_ERR_ARG;
+    }
+    CPUX86State *env = uc->cpu->env_ptr;
+    *state = env->rdrand_state;
+    *initialized = env->rdrand_state_initialized;
+    return UC_ERR_OK;
+}
+
+uc_err uc_x86_set_rdrand_state(struct uc_struct *uc, uint64_t state,
+                               bool initialized)
+{
+    if (uc == NULL || uc->arch != UC_ARCH_X86 || uc->cpu == NULL) {
+        return UC_ERR_ARG;
+    }
+    CPUX86State *env = uc->cpu->env_ptr;
+    env->rdrand_state = state;
+    env->rdrand_state_initialized = initialized;
+    return UC_ERR_OK;
 }
 
 DEFAULT_VISIBILITY

@@ -721,6 +721,11 @@
 #define tcg_const_ones_vec tcg_const_ones_vec_mips
 #define tcg_const_zeros_vec_matching tcg_const_zeros_vec_matching_mips
 #define tcg_const_ones_vec_matching tcg_const_ones_vec_matching_mips
+#define tcg_constant_i32 tcg_constant_i32_mips
+#define tcg_constant_i64 tcg_constant_i64_mips
+#define tcg_constant_vec_matching tcg_constant_vec_matching_mips
+#define tcg_constant_release_pending tcg_constant_release_pending_mips
+#define tcg_gen_gvec_dup_imm tcg_gen_gvec_dup_imm_mips
 #define tcg_gen_dup64i_vec tcg_gen_dup64i_vec_mips
 #define tcg_gen_dup32i_vec tcg_gen_dup32i_vec_mips
 #define tcg_gen_dup16i_vec tcg_gen_dup16i_vec_mips

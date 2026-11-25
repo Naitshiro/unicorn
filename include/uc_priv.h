@@ -272,6 +272,8 @@ typedef struct TCGContext TCGContext;
 struct uc_struct {
     uc_arch arch;
     uc_mode mode;
+    uint64_t rdrand_seed;
+    bool rdrand_seeded;
     uc_err errnum; // qemu/cpu-exec.c
     AddressSpace address_space_memory;
     AddressSpace address_space_io;
@@ -281,6 +283,7 @@ struct uc_struct {
     reg_reset_t reg_reset;
 
     uc_write_mem_t write_mem;
+    uc_write_mem_t write_mem_ram_direct; // writes plain RAM through the host pointer without toggling readonly; false if not RAM
     uc_read_mem_t read_mem;
     uc_read_mem_virtual_t read_mem_virtual;
     uc_virtual_to_physical_t virtual_to_physical;

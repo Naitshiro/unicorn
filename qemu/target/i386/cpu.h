@@ -166,6 +166,7 @@ typedef enum X86Seg {
 #define HF_IOBPT_SHIFT      24 /* an io breakpoint enabled */
 #define HF_MPX_EN_SHIFT     25 /* MPX Enabled (CR4+XCR0+BNDCFGx) */
 #define HF_MPX_IU_SHIFT     26 /* BND registers in-use */
+#define HF_AVX_EN_SHIFT     28 /* AVX Enabled (CR4+XCR0) */
 
 #define HF_CPL_MASK          (3 << HF_CPL_SHIFT)
 #define HF_INHIBIT_IRQ_MASK  (1 << HF_INHIBIT_IRQ_SHIFT)
@@ -191,6 +192,7 @@ typedef enum X86Seg {
 #define HF_IOBPT_MASK        (1 << HF_IOBPT_SHIFT)
 #define HF_MPX_EN_MASK       (1 << HF_MPX_EN_SHIFT)
 #define HF_MPX_IU_MASK       (1 << HF_MPX_IU_SHIFT)
+#define HF_AVX_EN_MASK       (1 << HF_AVX_EN_SHIFT)
 
 /* hflags2 */
 
@@ -1098,47 +1100,35 @@ typedef struct SegmentCache {
     uint32_t flags;
 } SegmentCache;
 
-#define MMREG_UNION(n, bits)        \
-    union n {                       \
-        uint8_t  _b_##n[(bits)/8];  \
-        uint16_t _w_##n[(bits)/16]; \
-        uint32_t _l_##n[(bits)/32]; \
-        uint64_t _q_##n[(bits)/64]; \
-        float32  _s_##n[(bits)/32]; \
-        float64  _d_##n[(bits)/64]; \
-    }
+typedef union MMXReg {
+    uint8_t  _b_MMXReg[64 / 8];
+    uint16_t _w_MMXReg[64 / 16];
+    uint32_t _l_MMXReg[64 / 32];
+    uint64_t _q_MMXReg[64 / 64];
+    float32  _s_MMXReg[64 / 32];
+    float64  _d_MMXReg[64 / 64];
+} MMXReg;
 
-typedef union {
-    uint8_t _b[16];
-    uint16_t _w[8];
-    uint32_t _l[4];
-    uint64_t _q[2];
-    float32 _s[4];
-    float64 _d[2];
+typedef union XMMReg {
+    uint64_t _q_XMMReg[128 / 64];
 } XMMReg;
 
-typedef union {
-    uint8_t _b[32];
-    uint16_t _w[16];
-    uint32_t _l[8];
-    uint64_t _q[4];
-    float32 _s[8];
-    float64 _d[4];
+typedef union YMMReg {
+    uint64_t _q_YMMReg[256 / 64];
+    XMMReg   _x_YMMReg[256 / 128];
 } YMMReg;
 
-#if 0
-typedef union {
-    uint8_t _b[64];
-    uint16_t _w[32];
-    uint32_t _l[16];
-    uint64_t _q[8];
-    float32 _s[16];
-    float64 _d[8];
+typedef union ZMMReg {
+    uint8_t  _b_ZMMReg[512 / 8];
+    uint16_t _w_ZMMReg[512 / 16];
+    uint32_t _l_ZMMReg[512 / 32];
+    uint64_t _q_ZMMReg[512 / 64];
+    float16  _h_ZMMReg[512 / 16];
+    float32  _s_ZMMReg[512 / 32];
+    float64  _d_ZMMReg[512 / 64];
+    XMMReg   _x_ZMMReg[512 / 128];
+    YMMReg   _y_ZMMReg[512 / 256];
 } ZMMReg;
-#endif
-
-typedef MMREG_UNION(ZMMReg, 512) ZMMReg;
-typedef MMREG_UNION(MMXReg, 64)  MMXReg;
 
 typedef struct BNDReg {
     uint64_t lb;
@@ -1161,6 +1151,14 @@ typedef struct BNDCSReg {
 #define ZMM_S(n) _s_ZMMReg[15 - (n)]
 #define ZMM_Q(n) _q_ZMMReg[7 - (n)]
 #define ZMM_D(n) _d_ZMMReg[7 - (n)]
+#define ZMM_H(n) _h_ZMMReg[31 - (n)]
+#define ZMM_X(n) _x_ZMMReg[3 - (n)]
+#define ZMM_Y(n) _y_ZMMReg[1 - (n)]
+
+#define XMM_Q(n) _q_XMMReg[1 - (n)]
+
+#define YMM_Q(n) _q_YMMReg[3 - (n)]
+#define YMM_X(n) _x_YMMReg[1 - (n)]
 
 #define MMX_B(n) _b_MMXReg[7 - (n)]
 #define MMX_W(n) _w_MMXReg[3 - (n)]
@@ -1173,6 +1171,14 @@ typedef struct BNDCSReg {
 #define ZMM_S(n) _s_ZMMReg[n]
 #define ZMM_Q(n) _q_ZMMReg[n]
 #define ZMM_D(n) _d_ZMMReg[n]
+#define ZMM_H(n) _h_ZMMReg[n]
+#define ZMM_X(n) _x_ZMMReg[n]
+#define ZMM_Y(n) _y_ZMMReg[n]
+
+#define XMM_Q(n) _q_XMMReg[n]
+
+#define YMM_Q(n) _q_YMMReg[n]
+#define YMM_X(n) _x_YMMReg[n]
 
 #define MMX_B(n) _b_MMXReg[n]
 #define MMX_W(n) _w_MMXReg[n]
@@ -1428,8 +1434,8 @@ typedef struct CPUX86State {
     float_status mmx_status; /* for 3DNow! float ops */
     float_status sse_status;
     uint32_t mxcsr;
-    ZMMReg xmm_regs[CPU_NB_REGS == 8 ? 8 : 32];
-    ZMMReg xmm_t0;
+    ZMMReg xmm_regs[CPU_NB_REGS == 8 ? 8 : 32] QEMU_ALIGNED(16);
+    ZMMReg xmm_t0 QEMU_ALIGNED(16);
     MMXReg mmx_t0;
 
     /*
@@ -1520,6 +1526,10 @@ typedef struct CPUX86State {
     uint8_t v_tpr;
 
     uintptr_t retaddr;
+
+    /* Replayed with CPU contexts so deterministic RDRAND/RDSEED state survives snapshots. */
+    uint64_t rdrand_state;
+    bool rdrand_state_initialized;
 
     /* Fields up to this point are cleared by a CPU reset */
     int end_reset_fields;
@@ -1741,6 +1751,7 @@ void cpu_set_ignne(CPUX86State *env);
 
 /* mpx_helper.c */
 void cpu_sync_bndcs_hflags(CPUX86State *env);
+void cpu_sync_avx_hflag(CPUX86State *env);
 
 /* this function must always be used to load data in the segment
    cache: it synchronizes the hflags with the segment cache values */
@@ -1859,6 +1870,9 @@ void host_vendor_fms(char *vendor, int *family, int *model, int *stepping);
 bool x86_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                       MMUAccessType access_type, int mmu_idx,
                       bool probe, uintptr_t retaddr);
+void x86_cpu_do_unaligned_access(CPUState *cs, vaddr vaddr,
+                                 MMUAccessType access_type,
+                                 int mmu_idx, uintptr_t retaddr);
 void x86_cpu_set_a20(X86CPU *cpu, int a20_state);
 
 static inline int x86_asidx_from_attrs(CPUState *cs, MemTxAttrs attrs)

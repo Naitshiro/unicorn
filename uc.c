@@ -968,13 +968,24 @@ uc_err uc_mem_write(uc_engine *uc, uint64_t address, const void *_bytes,
         if (mr) {
             uint32_t operms = mr->perms;
             uint64_t align = uc->target_page_align;
+            len = memory_region_len(uc, mr, address, size - count);
+            if (!(operms & UC_PROT_WRITE) && !uc->snapshot_level &&
+                uc->write_mem_ram_direct &&
+                uc->write_mem_ram_direct(&uc->address_space_memory, address,
+                                         bytes, len)) {
+                // write protected RAM written through its host pointer: the
+                // region flags and flat view stay untouched
+                count += len;
+                address += len;
+                bytes += len;
+                continue;
+            }
             if (!(operms & UC_PROT_WRITE)) { // write protected
                 // but this is not the program accessing memory, so temporarily
                 // mark writable
                 uc->readonly_mem(mr, false);
             }
 
-            len = memory_region_len(uc, mr, address, size - count);
             if (uc->snapshot_level && uc->snapshot_level > mr->priority) {
                 mr = uc->memory_cow(uc, mr, address & ~align,
                                     (len + (address & align) + align) & ~align);
@@ -2976,6 +2987,33 @@ uc_err uc_ctl(uc_engine *uc, uc_control_type control, ...)
 
         restore_jit_state(uc);
         break;
+
+    case UC_CTL_RDRAND_SEED: {
+        if (rw != UC_CTL_IO_WRITE) {
+            err = UC_ERR_ARG;
+            break;
+        }
+        uc->rdrand_seed = va_arg(args, uint64_t);
+        uc->rdrand_seeded = true;
+        break;
+    }
+
+    case UC_CTL_RDRAND_STATE: {
+        if (uc->arch != UC_ARCH_X86) {
+            err = UC_ERR_ARG;
+        } else if (rw == UC_CTL_IO_READ) {
+            uint64_t *state = va_arg(args, uint64_t *);
+            bool *initialized = va_arg(args, bool *);
+            err = uc_x86_get_rdrand_state(uc, state, initialized);
+        } else if (rw == UC_CTL_IO_WRITE) {
+            uint64_t state = va_arg(args, uint64_t);
+            int initialized = va_arg(args, int);
+            err = uc_x86_set_rdrand_state(uc, state, initialized != 0);
+        } else {
+            err = UC_ERR_ARG;
+        }
+        break;
+    }
 
     default:
         err = UC_ERR_ARG;

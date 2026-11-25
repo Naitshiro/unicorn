@@ -276,6 +276,7 @@ typedef struct TCGPool {
 
 #define TCG_POOL_CHUNK_SIZE 32768
 
+#define TCG_CONST_PENDING_MAX 64
 #if HOST_LONG_BITS == 32
 // Unicorn: On 32 bits targets, our instrumentation uses extra temps and
 //          thus could exhaust the max temps and cause segment fault.
@@ -674,6 +675,9 @@ struct TCGContext {
     TCGv_i32 delay_slot_flag;
 
     TCGTempSet free_temps[TCG_TYPE_COUNT * 2];
+    /* Unicorn: temps handed out by tcg_constant_*, freed per guest insn. */
+    TCGTemp *const_pending[TCG_CONST_PENDING_MAX];
+    int nb_const_pending;
     TCGTemp temps[TCG_MAX_TEMPS]; /* globals first, temps after */
 
     QTAILQ_HEAD(, TCGOp) ops, free_ops;
@@ -1183,12 +1187,20 @@ TCGv_vec tcg_const_ones_vec(TCGContext *tcg_ctx, TCGType);
 TCGv_vec tcg_const_zeros_vec_matching(TCGContext *tcg_ctx, TCGv_vec);
 TCGv_vec tcg_const_ones_vec_matching(TCGContext *tcg_ctx, TCGv_vec);
 
+TCGv_i32 tcg_constant_i32(TCGContext *tcg_ctx, int32_t val);
+TCGv_i64 tcg_constant_i64(TCGContext *tcg_ctx, int64_t val);
+TCGv_vec tcg_constant_vec_matching(TCGContext *tcg_ctx, TCGv_vec match,
+                                   unsigned vece, int64_t val);
+void tcg_constant_release_pending(TCGContext *tcg_ctx);
+
 #if UINTPTR_MAX == UINT32_MAX
 # define tcg_const_ptr(tcg_ctx, x)        ((TCGv_ptr)tcg_const_i32(tcg_ctx, (intptr_t)(x)))
 # define tcg_const_local_ptr(tcg_ctx, x)  ((TCGv_ptr)tcg_const_local_i32(tcg_ctx, (intptr_t)(x)))
+# define tcg_constant_ptr(tcg_ctx, x) ((TCGv_ptr)tcg_constant_i32(tcg_ctx, (intptr_t)(x)))
 #else
 # define tcg_const_ptr(tcg_ctx, x)        ((TCGv_ptr)tcg_const_i64(tcg_ctx, (intptr_t)(x)))
 # define tcg_const_local_ptr(tcg_ctx, x)  ((TCGv_ptr)tcg_const_local_i64(tcg_ctx, (intptr_t)(x)))
+# define tcg_constant_ptr(tcg_ctx, x) ((TCGv_ptr)tcg_constant_i64(tcg_ctx, (intptr_t)(x)))
 #endif
 
 TCGLabel *gen_new_label(TCGContext *tcg_ctx);
